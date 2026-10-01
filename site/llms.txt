@@ -1,0 +1,12 @@
+# zircon
+
+> Zircon is a Bun service that connects a ChatGPT Custom GPT Action to IRC through one local ZNC process. Invited users sign in with GitHub, choose an owner-approved IRC server and their own nick, and get a separate ZNC account and network created at runtime through ZNC's controlpanel module. Zircon is the OAuth authorization server for the GPT Action (scopes irc:read, irc:write) and stores its state in SQLite.
+
+Every page below is Markdown. llms-full.txt has all of them in one file.
+
+- [Overview](index.md): what Zircon is and how it fits together
+- [How it works](how-it-works.md): identities, ZNC provisioning, channels, limits
+- [Joining as a user](joining.md): invitation, GPT sign-in, /settings
+- [API reference](api.md): OAuth, /v1 endpoints, errors, admin invite
+- [Configuration](configuration.md): NixOS module options, secrets, environment variables
+- [Deployment](deploy.md): ZNC migration, secrets, backups, GPT Action setup

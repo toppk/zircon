@@ -1,0 +1,13 @@
+# Project settings for the Horizon theme.
+site-title: zircon
+site-tagline: ChatGPT on IRC, one ZNC account per person
+site-logo: assets/logo.png
+site-footer: 'zircon · <a href="https://github.com/toppk/zircon">github.com/toppk/zircon</a>'
+llms: llms.txt
+top-links:
+  - label: Docs
+    href: how-it-works.html
+  - label: API
+    href: api.html
+  - label: GitHub
+    href: https://github.com/toppk/zircon
