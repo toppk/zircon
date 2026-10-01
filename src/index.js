@@ -6,6 +6,10 @@ import { IrcPool } from "./pool.js";
 
 const config = loadConfig();
 const store = new Store(`${config.stateDir}/zircon.sqlite`);
+store.backup();
+const backupTimer = setInterval(() => {
+  try { store.backup(); } catch (error) { console.error("SQLite backup failed:", error.message); }
+}, 24 * 60 * 60_000);
 const provisioner = new ZncProvisioner(config, store);
 const pool = new IrcPool(config, store, provisioner);
 
@@ -17,5 +21,5 @@ const server = Bun.serve({
 });
 console.info(`Zircon listening on ${server.url}`);
 
-process.on("SIGTERM", () => { pool.stop(); void server.stop(); store.close(); });
-process.on("SIGINT", () => { pool.stop(); void server.stop(); store.close(); });
+process.on("SIGTERM", () => { clearInterval(backupTimer); pool.stop(); void server.stop(); store.close(); });
+process.on("SIGINT", () => { clearInterval(backupTimer); pool.stop(); void server.stop(); store.close(); });

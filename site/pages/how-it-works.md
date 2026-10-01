@@ -21,7 +21,9 @@ ZNC
 
 SQLite
 : `zircon.sqlite` under `/var/lib/zircon` holds users, GitHub identities,
-  browser sessions, hashed OAuth tokens, settings and the post audit.
+  browser sessions, hashed OAuth tokens, settings and the post audit. Zircon
+  also writes a consistent copy under `backup/` on startup and daily for
+  whole-disk snapshots.
 
 ## Identities
 

@@ -1,7 +1,7 @@
 import { Database } from "bun:sqlite";
 import { createHash, randomBytes, randomUUID } from "node:crypto";
-import { mkdirSync } from "node:fs";
-import { dirname } from "node:path";
+import { mkdirSync, renameSync, unlinkSync } from "node:fs";
+import { dirname, join } from "node:path";
 
 export const randomToken = () => randomBytes(32).toString("base64url");
 export const tokenHash = token => createHash("sha256").update(token).digest("hex");
@@ -9,6 +9,7 @@ const now = () => Date.now();
 
 export class Store {
   constructor(path) {
+    this.path = path;
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new Database(path, { create: true });
     this.db.run("PRAGMA journal_mode = WAL");
@@ -58,6 +59,26 @@ export class Store {
   }
 
   close() { this.db.close(); }
+
+  backup() {
+    if (this.path === ":memory:") throw new Error("In-memory database cannot be backed up");
+    const directory = join(dirname(this.path), "backup");
+    mkdirSync(directory, { recursive: true, mode: 0o700 });
+    const destination = join(directory, "zircon.sqlite");
+    const temporary = join(directory, `zircon-${randomUUID()}.tmp`);
+    try {
+      this.db.query("VACUUM INTO ?").run(temporary);
+      const copy = new Database(temporary, { readonly: true });
+      try {
+        if (copy.query("PRAGMA quick_check").get().quick_check !== "ok") throw new Error("SQLite backup failed integrity check");
+      } finally { copy.close(); }
+      renameSync(temporary, destination);
+      return destination;
+    } catch (error) {
+      try { unlinkSync(temporary); } catch { /* backup may have failed before creating it */ }
+      throw error;
+    }
+  }
 
   invite(login, allowedChannels, networkName) {
     const id = randomUUID();

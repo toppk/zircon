@@ -1,6 +1,9 @@
 import { expect, test } from "bun:test";
 import { createHash } from "node:crypto";
 import net from "node:net";
+import { mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { createHandler } from "../src/api.js";
 import { IrcClient, parseIrcLine } from "../src/irc.js";
 import { Store } from "../src/store.js";
@@ -109,6 +112,18 @@ test("one ZNC account and network are provisioned per invited user", () => {
     expect(commands).toContain(`SetNetwork nick ${alice.znc_username} primary alice`);
     expect(commands.at(-1)).toBe("SaveConfig");
   } finally { store.close(); }
+});
+
+test("online SQLite backup contains committed users while WAL is active", () => {
+  const dir = mkdtempSync(join(tmpdir(), "zircon-backup-test-"));
+  const store = new Store(join(dir, "zircon.sqlite"));
+  try {
+    store.invite("alice", ["#soup"], "chonkbase");
+    const backup = store.backup();
+    const copy = new Store(backup);
+    try { expect(copy.userByLogin("alice").github_login).toBe("alice"); }
+    finally { copy.close(); }
+  } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 
 test("ZNC controlpanel provisions dynamically over one IRC listener", async () => {
