@@ -17,24 +17,32 @@ in {
       default = 3000;
       description = "Loopback HTTP port for the reverse proxy.";
     };
+    maxUsers = mkOption { type = types.ints.between 1 100; default = 16; description = "Maximum enabled ZNC user accounts created through Zircon."; };
     environmentFile = mkOption {
       type = types.nullOr types.path;
       default = null;
-      description = "Absolute path outside the Nix store with ZNC_PASSWORD as KEY=value; never put secrets in Nix settings.";
+      description = "Absolute path outside the Nix store with ZNC_ADMIN_PASSWORD, ZNC_USER_SECRET, GITHUB_CLIENT_SECRET, OAUTH_CLIENT_SECRET, SESSION_SECRET and ADMIN_TOKEN.";
     };
     settings = mkOption {
       description = "Non-secret Zircon configuration.";
       default = {};
       type = types.submodule { options = {
         publicBaseUrl = mkOption { type = types.str; default = "https://zircon.chooser.us"; };
-        oidcIssuer = mkOption { type = types.nullOr types.str; default = null; };
-        oidcAudience = mkOption { type = types.str; default = "https://zircon.chooser.us"; };
-        oidcJwksUrl = mkOption { type = types.nullOr types.str; default = null; };
-        allowedSubjects = mkOption { type = types.listOf types.str; default = []; };
+        githubClientId = mkOption { type = types.str; default = ""; };
+        oauthClientId = mkOption { type = types.str; default = "zircon-chatgpt"; };
+        oauthRedirectUris = mkOption { type = types.listOf types.str; default = []; };
         zncPort = mkOption { type = types.port; default = 6667; };
-        zncUser = mkOption { type = types.str; default = "zircon"; };
-        zncNetwork = mkOption { type = types.nullOr types.str; default = null; };
-        ircNick = mkOption { type = types.str; default = "zircon"; };
+        zncAdminUser = mkOption { type = types.str; default = "zirconctl"; };
+        ircNetworks = mkOption {
+          type = types.listOf (types.submodule { options = {
+            name = mkOption { type = types.str; };
+            host = mkOption { type = types.str; };
+            port = mkOption { type = types.port; };
+            tls = mkOption { type = types.bool; default = true; };
+          }; });
+          default = [ { name = "chonkbase"; host = "irc.chonkbase.net"; port = 6697; tls = true; } ];
+          description = "Owner-approved IRC networks users may select.";
+        };
         ircUsername = mkOption { type = types.str; default = "zircon"; };
         ircRealname = mkOption { type = types.str; default = "Zircon ChatGPT bridge"; };
         ircChannels = mkOption { type = types.listOf types.str; default = []; };
@@ -46,10 +54,8 @@ in {
     assertions = [
       { assertion = cfg.environmentFile != null && !(lib.hasPrefix "/nix/store/" (toString cfg.environmentFile));
         message = "services.zircon.environmentFile must be an absolute path outside /nix/store"; }
-      { assertion = settings.oidcIssuer != null && settings.oidcJwksUrl != null && settings.zncNetwork != null;
-        message = "services.zircon.settings requires oidcIssuer, oidcJwksUrl, and zncNetwork"; }
-      { assertion = settings.allowedSubjects != [] && settings.ircChannels != [];
-        message = "services.zircon.settings requires allowedSubjects and ircChannels"; }
+      { assertion = settings.githubClientId != "" && settings.oauthRedirectUris != [] && settings.ircChannels != [] && settings.ircNetworks != [];
+        message = "services.zircon.settings requires githubClientId, oauthRedirectUris, ircChannels, and ircNetworks"; }
     ];
 
     systemd.services.zircon = {
@@ -59,16 +65,16 @@ in {
       wants = [ "network-online.target" ];
       environment = {
         PORT = toString cfg.port;
+        MAX_USERS = toString cfg.maxUsers;
         PUBLIC_BASE_URL = settings.publicBaseUrl;
-        OIDC_ISSUER = if settings.oidcIssuer == null then "" else settings.oidcIssuer;
-        OIDC_AUDIENCE = settings.oidcAudience;
-        OIDC_JWKS_URL = if settings.oidcJwksUrl == null then "" else settings.oidcJwksUrl;
-        OIDC_ALLOWED_SUBJECTS = lib.concatStringsSep "," settings.allowedSubjects;
+        GITHUB_CLIENT_ID = settings.githubClientId;
+        OAUTH_CLIENT_ID = settings.oauthClientId;
+        OAUTH_REDIRECT_URIS = lib.concatStringsSep "," settings.oauthRedirectUris;
+        STATE_DIR = "/var/lib/zircon";
         ZNC_HOST = "127.0.0.1";
         ZNC_PORT = toString settings.zncPort;
-        ZNC_USER = settings.zncUser;
-        ZNC_NETWORK = if settings.zncNetwork == null then "" else settings.zncNetwork;
-        IRC_NICK = settings.ircNick;
+        ZNC_ADMIN_USER = settings.zncAdminUser;
+        IRC_NETWORKS_JSON = builtins.toJSON settings.ircNetworks;
         IRC_USERNAME = settings.ircUsername;
         IRC_REALNAME = settings.ircRealname;
         IRC_CHANNELS = lib.concatStringsSep "," settings.ircChannels;
@@ -81,6 +87,7 @@ in {
         RestartSec = 5;
         DynamicUser = true;
         StateDirectory = "zircon";
+        UMask = "0077";
         WorkingDirectory = "/var/lib/zircon";
         ProtectSystem = "strict";
         ProtectHome = true;

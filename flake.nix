@@ -17,10 +17,8 @@
               enable = true;
               environmentFile = "/run/secrets/zircon.env";
               settings = {
-                oidcIssuer = "https://identity.example.com/";
-                oidcJwksUrl = "https://identity.example.com/.well-known/jwks.json";
-                allowedSubjects = [ "test-user" ];
-                zncNetwork = "chonkbase";
+                githubClientId = "test-github-id";
+                oauthRedirectUris = [ "https://chatgpt.com/aip/g-example/oauth/callback" ];
                 ircChannels = [ "#soup" ];
               };
             };
