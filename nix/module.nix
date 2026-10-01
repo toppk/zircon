@@ -31,7 +31,7 @@ in {
         oidcAudience = mkOption { type = types.str; default = "https://zircon.chooser.us"; };
         oidcJwksUrl = mkOption { type = types.nullOr types.str; default = null; };
         allowedSubjects = mkOption { type = types.listOf types.str; default = []; };
-        zncPort = mkOption { type = types.port; default = 6697; };
+        zncPort = mkOption { type = types.port; default = 6667; };
         zncUser = mkOption { type = types.str; default = "zircon"; };
         zncNetwork = mkOption { type = types.nullOr types.str; default = null; };
         ircNick = mkOption { type = types.str; default = "zircon"; };

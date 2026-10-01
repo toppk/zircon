@@ -20,8 +20,8 @@
                 oidcIssuer = "https://identity.example.com/";
                 oidcJwksUrl = "https://identity.example.com/.well-known/jwks.json";
                 allowedSubjects = [ "test-user" ];
-                zncNetwork = "example";
-                ircChannels = [ "#example" ];
+                zncNetwork = "chonkbase";
+                ircChannels = [ "#soup" ];
               };
             };
           }

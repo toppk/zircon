@@ -6,13 +6,13 @@ Zircon is a Bun/JavaScript service that connects ChatGPT to an IRC network throu
 
 Use an established OpenID Connect provider such as Auth0 or Keycloak to issue RS256 JWT access tokens for Zircon's API. Zircon uses `jose` to validate signature, issuer, audience, expiry, subject, and `irc:read` or `irc:write` scope. It does not issue tokens or manage user passwords. `OIDC_ALLOWED_SUBJECTS` restricts which provider users may act through the shared ZNC account.
 
-For a Custom GPT Action, choose OAuth in the GPT editor, enter your provider's authorization and token URLs, client ID, client secret, and scopes, then import `https://zircon.chooser.us/openapi.json`. Register the exact ChatGPT callback URL with the provider. [Official OpenAI Action authentication documentation](https://developers.openai.com/api/docs/actions/authentication)
+The intended integration is a Custom GPT Action. Its authentication is being redesigned around Zircon's own OAuth server and per-user configuration; the current external OIDC verifier is a temporary scaffold and the app is not ready to deploy. [Official OpenAI Action authentication documentation](https://developers.openai.com/api/docs/actions/authentication)
 
 An MCP plugin requires a separate MCP adapter and OAuth discovery. [Official OpenAI plugin authentication documentation](https://developers.openai.com/plugins/build/auth)
 
 ## IRC and ZNC
 
-Infra provides ZNC on the same host. Zircon connects over the IRC protocol to `127.0.0.1:6697` by default and authenticates with `PASS user/network:password`. The ZNC account and network must already exist. Set ZNC to join the channels listed in `IRC_CHANNELS` and keep enough buffer lines for the desired replay window. Zircon sends `JOIN` for those channels at login as well.
+Infra runs ZNC on ne2. Zircon connects over plain IRC to `127.0.0.1:6667` and authenticates with `PASS zircon/chonkbase:password`. ZNC is already connected to `irc.chonkbase.net:6697` over verified TLS and is in `#soup`, with a 500-line buffer kept after replay. Zircon sends `JOIN #soup` at login as well.
 
 The ZNC password belongs in the systemd environment file outside the Nix store. Zircon's loopback TCP connection to ZNC is unencrypted; configure ZNC's client listener on loopback only. ZNC handles TLS to the upstream IRC server.
 
@@ -25,13 +25,15 @@ Example host configuration:
 ```nix
 services.zircon = {
   enable = true;
-  environmentFile = "/run/secrets/zircon.env";
+  environmentFile = "/var/lib/zircon-secrets/zircon.env";
   settings = {
     oidcIssuer = "https://identity.example.com/";
     oidcJwksUrl = "https://identity.example.com/.well-known/jwks.json";
     allowedSubjects = [ "provider-user-id" ];
-    zncNetwork = "example";
-    ircChannels = [ "#example" ];
+    zncPort = 6667;
+    zncUser = "zircon";
+    zncNetwork = "chonkbase";
+    ircChannels = [ "#soup" ];
   };
 };
 ```

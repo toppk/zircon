@@ -18,7 +18,7 @@ export function loadConfig() {
   if (ircChannels.some(c => !/^#[^\s,\x00-\x1f]{1,100}$/.test(c))) {
     throw new Error("IRC_CHANNELS must contain comma-separated channel names beginning with #");
   }
-  const zncPort = Number(process.env.ZNC_PORT ?? "6697");
+  const zncPort = Number(process.env.ZNC_PORT ?? "6667");
   const port = Number(process.env.PORT ?? "3000");
   if (![zncPort, port].every(n => Number.isInteger(n) && n > 0 && n <= 65535)) {
     throw new Error("ZNC_PORT and PORT must be valid TCP ports");
