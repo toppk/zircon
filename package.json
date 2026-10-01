@@ -1,0 +1,14 @@
+{
+  "name": "zircon-irc",
+  "version": "0.1.0",
+  "dependencies": {
+    "jose": "^6.2.12"
+  },
+  "private": true,
+  "scripts": {
+    "start": "bun run src/index.js",
+    "dev": "bun --watch src/index.js",
+    "test": "bun test"
+  },
+  "type": "module"
+}
