@@ -70,7 +70,13 @@ input:not([type="checkbox"]), select { display: block; width: 100%; min-height: 
 fieldset { margin: 24px 0; padding: 16px; border: 1px solid #ded2c9; border-radius: 10px; }
 fieldset label { display: inline-flex; align-items: center; gap: 8px; padding: 4px 0; }
 
-.owner-users { margin-top: 32px; padding-top: 8px; border-top: 1px solid #e8ddd4; }
+.settings-tabs { display: flex; flex-wrap: wrap; gap: 8px; margin: 20px 0 24px; border-bottom: 1px solid #ded2c9; }
+.settings-tabs a { padding: 10px 12px; border-bottom: 3px solid transparent; color: #574e49; font-weight: 650; text-decoration: none; }
+.settings-tabs a:hover { color: #69371f; }
+.settings-tabs a[aria-current="page"] { border-bottom-color: #833619; color: #833619; }
+.settings-tabs a:focus-visible { outline: 3px solid #da8a54; outline-offset: 2px; }
+.settings-footer { margin-top: 32px; padding-top: 16px; border-top: 1px solid #e8ddd4; color: #786c65; font-size: 13px; text-align: center; }
+.owner-users { margin-top: 8px; }
 .owner-users h2 { margin-bottom: 8px; }
 .owner-users h3 { margin: 28px 0 8px; }
 .owner-users fieldset { margin: 12px 0; }

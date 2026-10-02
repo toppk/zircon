@@ -2,6 +2,7 @@ import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { readFileSync } from "node:fs";
 import { githubIdentity } from "./github.js";
 import { randomToken, tokenHash } from "./store.js";
+import { version } from "./version.js";
 
 const SESSION_COOKIE = "__Host-zircon_session";
 const GITHUB_COOKIE = "__Host-zircon_github_state";
@@ -310,16 +311,21 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
     if (path === "/settings" && request.method === "GET") {
       const user = sessionUser(request);
       if (!user) return redirect(`${base}/login`);
+      const owner = isOwner(user);
+      const peopleTab = owner && url.searchParams.get("tab") === "people";
+      const tabs = owner ? `<nav class="settings-tabs" aria-label="Settings sections">
+        <a href="/settings" ${peopleTab ? "" : 'aria-current="page"'}>Settings</a>
+        <a href="/settings?tab=people" ${peopleTab ? 'aria-current="page"' : ""}>People with access</a></nav>` : "";
       const allowed = JSON.parse(user.allowed_channels);
       const selected = new Set(JSON.parse(user.selected_channels));
       const enabledChannels = new Set([...selected].map(channel => channel.toLowerCase()));
       const options = allowed.map(channel => `<label><input type="checkbox" name="channel" value="${escapeHtml(channel)}" ${selected.has(channel) ? "checked" : ""}>${escapeHtml(channel)}</label>`).join("<br>");
       const networks = config.ircNetworks.map(network => `<option value="${escapeHtml(network.name)}" ${network.name === user.network_name ? "selected" : ""}>${escapeHtml(network.name)} (${escapeHtml(network.host)})</option>`).join("");
-      const diagnosticsLink = config.diagnosticsEnabled && isOwner(user)
+      const diagnosticsLink = config.diagnosticsEnabled && owner
         ? '<p><a href="/admin/events">View recent diagnostics</a></p>' : "";
       const grantOptions = selectedChannels => config.ircChannels.map(channel =>
         `<label><input type="checkbox" name="channel" value="${escapeHtml(channel)}" ${selectedChannels.includes(channel) ? "checked" : ""}>${escapeHtml(channel)}</label>`).join("");
-      const ownerPanel = isOwner(user) ? `<section class="owner-users"><h2>People with access</h2><p>${store.userCount()} of ${config.maxUsers ?? 16} places used. Grant channels to a GitHub username; each person chooses which granted channels to enable. Saving grants for an existing person replaces their current grants. Uncheck every channel to remove their IRC access.</p>
+      const ownerPanel = owner ? `<section class="owner-users"><h2>People with access</h2><p>${store.userCount()} of ${config.maxUsers ?? 16} places used. Grant channels to a GitHub username; each person chooses which granted channels to enable. Saving grants for an existing person replaces their current grants. Uncheck every channel to remove their IRC access.</p>${diagnosticsLink}
         ${url.searchParams.get("users") === "saved" ? '<p class="notice" role="status">Channel grants saved.</p>' : ""}
         <form method="post" action="/settings/users"><input type="hidden" name="csrf" value="${csrf(config, cookieValue(request))}">
           <label>Invite GitHub username <input name="github_login" maxlength="39" autocomplete="off" required></label>
@@ -336,13 +342,14 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
           ? enabledChannels.has(subscription.arguments.channel.toLowerCase()) ? "" : " <em>(paused: channel disabled)</em>"
           : enabledChannels.size ? " <em>(follows enabled channels)</em>" : " <em>(paused: no channels enabled)</em>"} to ${escapeHtml(new URL(subscription.url).origin)}${subscription.expiresAt ? ` until ${escapeHtml(subscription.expiresAt)}` : " (no expiry)"}
         <form method="post" action="/settings/subscriptions/revoke"><input type="hidden" name="csrf" value="${csrf(config, cookieValue(request))}"><input type="hidden" name="id" value="${escapeHtml(subscription.id)}"><button>Revoke</button></form></li>`).join("");
-      return page("Zircon settings", `<p>GitHub: ${escapeHtml(user.github_login)}</p><p>IRC is ${user.online ? "online" : "offline"}. Staying online records new channel activity and delivers subscribed mention events. ChatGPT can use go_offline and go_online when you ask it to change your presence.</p>${diagnosticsLink}<form method="post" action="/settings">
+      const settingsPanel = `<p>GitHub: ${escapeHtml(user.github_login)}</p><p>IRC is ${user.online ? "online" : "offline"}. Staying online records new channel activity and delivers subscribed mention events. ChatGPT can use go_offline and go_online when you ask it to change your presence.</p><form method="post" action="/settings">
         <input type="hidden" name="csrf" value="${csrf(config, cookieValue(request))}">
         <label>IRC network <select name="network_name">${networks}</select></label>
         <label>IRC nick <input name="nick" maxlength="31" value="${escapeHtml(user.nick)}" required></label>
         <label>IRC display name <input name="display_name" maxlength="32" value="${escapeHtml(user.display_name)}" required></label>
         <fieldset><legend>Channels enabled in ChatGPT</legend><p>New channels start off. Select a granted channel to join it and let ChatGPT read and post there.</p>${options}</fieldset><button>Save</button></form>
-        <h2>Event subscriptions</h2><p>ChatGPT can receive new mentions while IRC is online. A subscription filtered to one channel stays there when you change channels; one without a channel filter follows all channels you enable. Revoking a subscription stops future deliveries.</p><ul>${subscriptions || "<li>No active subscriptions</li>"}</ul>${ownerPanel}`);
+        <h2>Event subscriptions</h2><p>ChatGPT can receive new mentions while IRC is online. A subscription filtered to one channel stays there when you change channels; one without a channel filter follows all channels you enable. Revoking a subscription stops future deliveries.</p><ul>${subscriptions || "<li>No active subscriptions</li>"}</ul>`;
+      return page("Zircon settings", `${tabs}${peopleTab ? ownerPanel : settingsPanel}<footer class="settings-footer">Zircon ${escapeHtml(version)}</footer>`);
     }
     if (path === "/settings/subscriptions/revoke" && request.method === "POST") {
       const user = sessionUser(request);
@@ -359,11 +366,11 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
       if (!isOwner(user)) return json({ error: "Forbidden" }, 403);
       const form = await request.formData();
       if (!requireCsrf(request, form)) return json({ error: "Forbidden" }, 403);
-      if (!store.allowRate("admin-invite", 30, 3600_000)) return page("Too many invitations", "<p>Please try again later.</p><p><a href=\"/settings\">Back to settings</a></p>", [], 429);
+      if (!store.allowRate("admin-invite", 30, 3600_000)) return page("Too many invitations", "<p>Please try again later.</p><p><a href=\"/settings?tab=people\">Back to people</a></p>", [], 429);
       const login = String(form.get("github_login") ?? "").trim().toLowerCase();
       const result = await saveInvite(login, form.getAll("channel"));
-      if (result.error) return page("Could not save grants", `<p>${escapeHtml(result.error)}</p><p><a href="/settings">Back to settings</a></p>`, [], result.status);
-      return redirect(`${base}/settings?users=saved`);
+      if (result.error) return page("Could not save grants", `<p>${escapeHtml(result.error)}</p><p><a href="/settings?tab=people">Back to people</a></p>`, [], result.status);
+      return redirect(`${base}/settings?tab=people&users=saved`);
     }
     if (path === "/settings" && request.method === "POST") {
       const user = sessionUser(request);

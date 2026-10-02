@@ -282,7 +282,7 @@ test("MCP discovery, OAuth, history, posting and presence tools", async () => {
     expect(status.upstreamConnected).toBeNull();
     expect(status.lastReceived.entryId).toBe(echoed.entryId);
     expect(status.channels[0].lastAcknowledged.entryId).toBe(unread.entries.at(-1).entryId);
-    expect(status.version).toBe("0.7.5");
+    expect(status.version).toBe("0.7.6");
     const lastHour = (await (await mcp("tools/call", { name: "read_history", arguments: { channel: "#soup", mode: "last_hour" } })).json()).result.structuredContent;
     expect(lastHour.entries.some(item => item.entryId === echoed.entryId)).toBe(true);
     expect((await (await mcp("tools/call", { name: "send_message", arguments: outgoing })).json()).result.structuredContent.status).toBe("echoed");
@@ -353,10 +353,23 @@ test("owner settings list users and manage channel grants without exposing the a
     const settings = await request("/settings", { headers: { Cookie: ownerCookie } });
     const html = await settings.text();
     expect(html).toContain("People with access");
-    expect(html).toContain("bob");
+    expect(html).toContain('href="/settings" aria-current="page"');
+    expect(html).toContain("IRC network");
+    expect(html).not.toContain("Current people");
+    expect(html).toContain("Zircon 0.7.6");
     expect(html).not.toContain(ownerConfig.adminToken);
-    const csrf = html.match(/name="csrf" value="([^"]+)"/)[1];
-    expect(await (await request("/settings", { headers: { Cookie: outsiderCookie } })).text()).not.toContain("People with access");
+    const people = await (await request("/settings?tab=people", { headers: { Cookie: ownerCookie } })).text();
+    expect(people).toContain('href="/settings?tab=people" aria-current="page"');
+    expect(people).toContain("Current people");
+    expect(people).toContain("bob");
+    expect(people).toContain("Zircon 0.7.6");
+    expect(people).not.toContain("IRC network <select");
+    const csrf = people.match(/name="csrf" value="([^"]+)"/)[1];
+    const outsiderPage = await (await request("/settings?tab=people", { headers: { Cookie: outsiderCookie } })).text();
+    expect(outsiderPage).not.toContain("People with access");
+    expect(outsiderPage).not.toContain("settings-tabs");
+    expect(outsiderPage).toContain("IRC network");
+    expect(outsiderPage).toContain("Zircon 0.7.6");
     const post = (cookie, fields, origin = base) => {
       const body = new URLSearchParams();
       for (const [key, value] of Object.entries(fields)) {
@@ -370,7 +383,9 @@ test("owner settings list users and manage channel grants without exposing the a
     expect((await post(ownerCookie, { ...invite, csrf: "wrong" })).status).toBe(403);
     expect((await post(ownerCookie, invite, "https://other.example.com")).status).toBe(403);
     expect((await post(ownerCookie, { ...invite, channel: ["#unknown"] })).status).toBe(400);
-    expect((await post(ownerCookie, invite)).status).toBe(303);
+    const invited = await post(ownerCookie, invite);
+    expect(invited.status).toBe(303);
+    expect(invited.headers.get("location")).toBe(`${base}/settings?tab=people&users=saved`);
     expect(JSON.parse(store.userByLogin("carol").allowed_channels)).toEqual(["#soup", "#other"]);
     expect(JSON.parse(store.userByLogin("carol").selected_channels)).toEqual([]);
     store.updateSettings(outsider.id, outsider.display_name, ["#soup"], outsider.network_name, outsider.nick);
@@ -395,7 +410,7 @@ test("owner access stays with the pinned GitHub ID after a login is reused", asy
     const replacement = inviteWithChannels(store, "alice");
     store.githubUser("202", "alice");
     const handle = createHandler(ownerConfig, {}, store, async () => null);
-    const settings = async user => (await handle(new Request(`${base}/settings`, {
+    const settings = async user => (await handle(new Request(`${base}/settings?tab=people`, {
       headers: { Cookie: `__Host-zircon_session=${store.createSession(user.id)}` } }))).text();
     expect(await settings(original)).toContain("People with access");
     expect(await settings(replacement)).not.toContain("People with access");
