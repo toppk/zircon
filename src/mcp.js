@@ -1,10 +1,13 @@
 const object = properties => ({ type: "object", properties, additionalProperties: false });
 const string = { type: "string" };
-const entry = { ...object({ network: string, channel: string, kind: string,
+const entry = { ...object({ entryId: string, messageId: { type: ["string", "null"] },
+  network: string, channel: string, kind: string,
   time: string, observedAt: string, timestampSource: { type: "string", enum: ["server", "observed", "local"] },
   nick: string, text: string, target: { type: ["string", "null"] } }),
-  required: ["network", "channel", "kind", "time", "observedAt", "timestampSource", "nick", "text", "target"] };
+  required: ["entryId", "messageId", "network", "channel", "kind", "time", "observedAt", "timestampSource", "nick", "text", "target"] };
 const cursor = { type: ["string", "null"] };
+const received = { ...object({ entryId: string, kind: string, channel: string, observedAt: string }),
+  required: ["entryId", "kind", "channel", "observedAt"] };
 const tools = [
   {
     name: "list_channels", title: "List IRC channels",
@@ -59,10 +62,38 @@ const tools = [
     description: "Post one message to an enabled IRC channel under this user's nick. This is a public write action: confirm the exact channel and text with the user, unless they gave standing authorization for replies in this channel and chat. A successful result means queued to ZNC, never confirmed delivered. Reuse the same idempotency_key on retries; messageId stays stable.",
     inputSchema: { ...object({ channel: string, text: { type: "string", minLength: 1, maxLength: 400 },
       idempotency_key: { type: "string", minLength: 8, maxLength: 128 } }), required: ["channel", "text", "idempotency_key"] },
-    outputSchema: { ...object({ status: { type: "string", enum: ["queued", "pending"] }, network: string,
+    outputSchema: { ...object({ status: { type: "string", enum: ["queued", "pending", "echoed"] }, network: string,
       channel: string, messageId: string }), required: ["status", "network", "channel", "messageId"] },
     securitySchemes: [{ type: "oauth2", scopes: ["irc:write"] }],
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
+  },
+  {
+    name: "get_message_status", title: "Check an outgoing message",
+    description: "Check what Zircon knows about one send_message result. queued means written to the local ZNC socket; echoed means Zircon later observed a matching line through ZNC. Neither proves another person saw it. Failed requests can be retried with the original idempotency key.",
+    inputSchema: { ...object({ message_id: string }), required: ["message_id"] },
+    outputSchema: { ...object({ messageId: string, network: string, channel: string,
+      status: { type: "string", enum: ["pending", "queued", "echoed", "failed"] },
+      createdAt: string, echoedAt: cursor, entryId: cursor, failureReason: cursor }),
+      required: ["messageId", "network", "channel", "status", "createdAt", "echoedAt", "entryId", "failureReason"] },
+    securitySchemes: [{ type: "oauth2", scopes: ["irc:read"] }],
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  },
+  {
+    name: "get_irc_status", title: "Check IRC capture and event delivery",
+    description: "Inspect the current nick, Zircon's local ZNC session, ZNC's upstream IRC connection, joined channels, most recently captured activity, and mention subscription delivery health. A connected ZNC session alone does not prove upstream readiness; finite ZNC buffers mean capture continuity cannot be guaranteed after a disconnect.",
+    inputSchema: object({}),
+    outputSchema: { ...object({ nick: string, network: string, online: { type: "boolean" },
+      zncSession: { type: "string", enum: ["offline", "connecting", "connected"] },
+      upstreamConnected: { type: ["boolean", "null"] }, joinedChannels: { type: "array", items: string },
+      lastReceived: { anyOf: [received, { type: "null" }] }, captureGapPossibleSince: cursor,
+      captureContinuity: { type: "string", enum: ["unverified"] },
+      activeSubscriptions: { type: "integer" }, pendingDeliveries: { type: "integer" },
+      lastEventAttemptAt: cursor, lastEventDeliveryStatus: cursor }),
+      required: ["nick", "network", "online", "zncSession", "upstreamConnected", "joinedChannels",
+        "lastReceived", "captureGapPossibleSince", "captureContinuity", "activeSubscriptions",
+        "pendingDeliveries", "lastEventAttemptAt", "lastEventDeliveryStatus"] },
+    securitySchemes: [{ type: "oauth2", scopes: ["irc:read"] }],
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   ...[false, true].map(online => ({
     name: online ? "go_online" : "go_offline", title: online ? "Go online on IRC" : "Go offline on IRC",
@@ -108,7 +139,7 @@ export function createMcpHandler(config, store, pool, events) {
     if (call.method === "initialize") return result(call.id, {
       protocolVersion: call.params?.protocolVersion === "2026-07-28" ? "2026-07-28" : "2025-06-18",
       capabilities: { tools: { listChanged: false }, events: {} },
-      serverInfo: { name: "zircon-irc", title: "Zircon IRC", version: "0.5.0" },
+      serverInfo: { name: "zircon-irc", title: "Zircon IRC", version: "0.6.0" },
       instructions: "Use list_channels, then read_unread for normal channel reading. Process each batch and call ack_messages with its batchId; unacknowledged batches are returned again. get_history and search_messages do not change unread state. Staying online records new activity and delivers subscribed mention events. Sending an IRC message is public and irreversible; confirm its destination and text unless the user explicitly authorized automatic replies in this chat and channel.",
     });
     if (call.method === "ping") return result(call.id, {});
@@ -120,8 +151,8 @@ export function createMcpHandler(config, store, pool, events) {
         delivery: ["webhook"],
         inputSchema: object({ network: string, channel: string, sender: string, keyword: string }),
         payloadSchema: { ...object({ network: string, channel: string, sender: string, text: string,
-          kind: string, observedAt: string }),
-          required: ["network", "channel", "sender", "text", "kind", "observedAt"] },
+          kind: string, observedAt: string, entryId: string }),
+          required: ["network", "channel", "sender", "text", "kind", "observedAt", "entryId"] },
       }] });
     }
     if (call.method === "events/subscribe" || call.method === "events/unsubscribe") {
@@ -200,6 +231,30 @@ export function createMcpHandler(config, store, pool, events) {
       if (!store.ackMessages(user, readPrincipal.clientId, args.batch_id)) return error(call.id, -32602, "Unknown batch");
       return toolResult(call.id, { acknowledged: true });
     }
+    if (name === "get_message_status") {
+      if (typeof args.message_id !== "string" || !/^msg_[A-Za-z0-9_-]{24}$/.test(args.message_id) ||
+          Object.keys(args).some(key => key !== "message_id")) return error(call.id, -32602, "Invalid message ID");
+      const status = store.postStatus(user, args.message_id);
+      if (!status) return error(call.id, -32602, "Unknown message ID");
+      return toolResult(call.id, status);
+    }
+    if (name === "get_irc_status") {
+      if (Object.keys(args).length) return error(call.id, -32602, "Invalid arguments");
+      if (!store.allowRate(`status:${user.id}`, 10, 60_000)) return error(call.id, -32000, "Status rate limit reached");
+      let upstreamConnected = null;
+      try { upstreamConnected = await pool.provisioner?.networkStatus?.(user) ?? null; }
+      catch (cause) { console.error("Could not query ZNC upstream status:", cause.message); }
+      const client = pool.clients?.get(user.id);
+      const enabled = new Set(JSON.parse(user.selected_channels).map(channel => channel.toLowerCase()));
+      const status = store.captureStatus(user);
+      return toolResult(call.id, { nick: user.nick, network: user.network_name, online: Boolean(user.online),
+        zncSession: pool.connectionState?.(user) ?? (user.online ? "connecting" : "offline"),
+        upstreamConnected, joinedChannels: [...(client?.joined ?? [])].filter(channel => enabled.has(channel.toLowerCase())),
+        lastReceived: status.lastReceived, captureGapPossibleSince: status.captureGapPossibleSince,
+        captureContinuity: "unverified", activeSubscriptions: status.activeSubscriptions,
+        pendingDeliveries: status.pendingDeliveries, lastEventAttemptAt: status.lastEventAttemptAt,
+        lastEventDeliveryStatus: status.lastEventDeliveryStatus });
+    }
     if (name === "search_messages") {
       const channels = JSON.parse(user.selected_channels);
       const channel = typeof args.channel === "string" ? channels.find(item => item.toLowerCase() === args.channel.toLowerCase()) : null;
@@ -233,22 +288,19 @@ export function createMcpHandler(config, store, pool, events) {
       const messageId = store.outgoingMessageId(user, key);
       if (reservation !== "new") return toolResult(call.id, { status: reservation, network: user.network_name, channel, messageId });
       if (!store.allowRate(`post:${user.id}`, 20, 60_000) || !store.allowRate(`post:network:${user.network_name}`, 60, 60_000)) {
-        store.cancelPost(user, key);
+        store.failPost(user, key, "rate_limited");
         return error(call.id, -32000, "Message rate limit reached");
       }
       try {
         const irc = await pool.forUser(user);
         irc.sendMessage(channel, message);
       } catch (cause) {
-        store.cancelPost(user, key);
+        store.failPost(user, key, "channel_unavailable");
         console.error("MCP IRC post failed:", cause.message);
         return error(call.id, -32603, "IRC channel unavailable");
       }
       store.completePost(user, key);
       store.auditPost(user, channel, message);
-      const time = new Date().toISOString();
-      store.recordActivity(user, { channel, kind: "message", time, observedAt: time,
-        timestampSource: "local", nick: user.nick, text: message });
       return toolResult(call.id, { status: "queued", network: user.network_name, channel, messageId });
     }
     if (writeTool) {

@@ -97,6 +97,57 @@ export function runZncCommands(config, commands, connect = net.connect) {
   });
 }
 
+export function queryZncNetworkStatus(config, user, connect = net.connect) {
+  if (!safeWord(user.znc_username)) throw new Error("Invalid ZNC user name");
+  return new Promise((resolve, reject) => {
+    const socket = connect({ host: config.zncHost, port: config.zncPort });
+    let buffer = "";
+    let ready = false;
+    let finished = false;
+    let borders = 0;
+    let connected = null;
+    const timeout = setTimeout(() => finish(new Error("ZNC status timed out")), 8000);
+    function finish(error) {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      socket.destroy();
+      if (error) reject(error); else resolve(connected);
+    }
+    function write(line) { socket.write(`${line}\r\n`); }
+    socket.on("connect", () => {
+      write(`PASS ${config.zncAdminUser}:${config.zncAdminPassword}`);
+      write("NICK zirconctl");
+      write("USER zirconctl 0 * :Zircon control");
+    });
+    socket.on("data", data => {
+      buffer += data.toString("utf8");
+      if (buffer.length > 65536) return finish(new Error("ZNC status response too large"));
+      let newline;
+      while ((newline = buffer.indexOf("\n")) !== -1 && !finished) {
+        const line = parseIrcLine(buffer.slice(0, newline).replace(/\r$/, ""));
+        buffer = buffer.slice(newline + 1);
+        if (line.command === "PING") { write(`PONG :${line.params.at(-1)}`); continue; }
+        if (["464", "465"].includes(line.command)) return finish(new Error("ZNC administrator authentication failed"));
+        if (line.command === "001" && !ready) {
+          ready = true;
+          write(`PRIVMSG *controlpanel :ListNetworks ${user.znc_username}`);
+          continue;
+        }
+        if (!ready || line.command !== "PRIVMSG" ||
+            line.prefix?.split("!", 1)[0]?.toLowerCase() !== "*controlpanel") continue;
+        const reply = line.params.at(-1) ?? "";
+        if (/^\+-+/.test(reply)) { if (++borders >= 3) return finish(); continue; }
+        if (reply === "No networks") return finish();
+        const cells = reply.split("|").slice(1, -1).map(cell => cell.trim());
+        if (cells[0] === "primary" && ["Yes", "No"].includes(cells[1])) connected = cells[1] === "Yes";
+      }
+    });
+    socket.on("error", error => finish(error));
+    socket.on("close", () => { if (!finished) finish(new Error("ZNC status connection closed")); });
+  });
+}
+
 export class ZncProvisioner {
   constructor(config, store, runner = runZncCommands) { this.config = config; this.store = store; this.runner = runner; this.pending = new Map(); }
   async ensure(user) {
@@ -119,4 +170,5 @@ export class ZncProvisioner {
     const current = this.store.userById(user.id);
     if (!current.provisioned || !current.buffer_policy) return this.ensure(current);
   }
+  networkStatus(user) { return queryZncNetworkStatus(this.config, user); }
 }

@@ -130,6 +130,7 @@ export class EventService {
     try {
       const result = await this.post(delivery.url, delivery.secret, delivery.subscription_id, delivery.event_id, payload,
         delivery.rotate_until > Date.now() ? delivery.previous_secret : null);
+      this.store.recordEventAttempt(delivery.subscription_id, String(result.status));
       if (result.status === 410) {
         this.store.db.query("DELETE FROM event_deliveries WHERE subscription_id=?").run(delivery.subscription_id);
         this.store.db.query("DELETE FROM event_subscriptions WHERE id=?").run(delivery.subscription_id);
@@ -137,6 +138,7 @@ export class EventService {
         result.status === 429 || result.status >= 500 ? "retry" : "done");
       this.store.recordDiagnostic(user, "event", "delivery", String(result.status));
     } catch (error) {
+      this.store.recordEventAttempt(delivery.subscription_id, "error");
       this.store.finishEventDelivery(delivery.event_id, "retry");
       this.store.recordDiagnostic(user, "event", "delivery_error", String(error.message).slice(0, 64));
     }

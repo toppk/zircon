@@ -9,7 +9,7 @@ import { EventService, publicIp, validCallbackUrl, validWebhookSecret, webhookSi
 import { IrcClient, parseIrcLine } from "../src/irc.js";
 import { IrcPool } from "../src/pool.js";
 import { Store } from "../src/store.js";
-import { bufferPolicyCommands, provisioningCommands, runZncCommands, userPassword, ZncProvisioner } from "../src/znc-admin.js";
+import { bufferPolicyCommands, provisioningCommands, queryZncNetworkStatus, runZncCommands, userPassword, ZncProvisioner } from "../src/znc-admin.js";
 
 const base = "https://zircon.example.com";
 const callback = "https://chatgpt.com/aip/g-example/oauth/callback";
@@ -209,7 +209,7 @@ test("MCP discovery, OAuth, history, posting and presence tools", async () => {
       Authorization: `Bearer ${tokens.access_token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }) });
     expect((await slashList.json()).result.tools.map(tool => tool.name)).toEqual(listed.map(tool => tool.name));
-    expect(listed.map(tool => tool.name)).toEqual(["list_channels", "read_unread", "ack_messages", "get_history", "search_messages", "send_message", "go_offline", "go_online"]);
+    expect(listed.map(tool => tool.name)).toEqual(["list_channels", "read_unread", "ack_messages", "get_history", "search_messages", "send_message", "get_message_status", "get_irc_status", "go_offline", "go_online"]);
     expect(listed.every(tool => tool.outputSchema && ["readOnlyHint", "destructiveHint", "openWorldHint"].every(key => typeof tool.annotations?.[key] === "boolean"))).toBe(true);
     expect(listed.find(tool => tool.name === "send_message").annotations.destructiveHint).toBe(true);
     expect((await (await mcp("tools/call", { name: "list_channels", arguments: {} })).json()).result.structuredContent.channels).toEqual(["#soup"]);
@@ -219,6 +219,8 @@ test("MCP discovery, OAuth, history, posting and presence tools", async () => {
     expect(unread.entries[1].time).toBe("2026-10-01T00:01:00.000Z");
     expect(unread.entries[1].timestampSource).toBe("server");
     expect(unread.entries[1].mention).toBe(true);
+    expect(unread.entries[1].entryId).toStartWith("entry_");
+    expect(unread.entries[1].messageId).toBeNull();
     expect(unread.entries[1].id).toBeUndefined();
     expect((await (await mcp("tools/call", { name: "read_unread", arguments: { channel: "#soup", limit: 1 } })).json()).result.structuredContent.batchId).toBe(unread.batchId);
     const history = (await (await mcp("tools/call", { name: "get_history", arguments: { channel: "#soup" } })).json()).result.structuredContent;
@@ -232,7 +234,21 @@ test("MCP discovery, OAuth, history, posting and presence tools", async () => {
     expect((await mcp("tools/call", { name: "send_message", arguments: outgoing }, readOnly.access_token)).status).toBe(401);
     const queued = (await (await mcp("tools/call", { name: "send_message", arguments: outgoing })).json()).result.structuredContent;
     expect(queued).toEqual({ status: "queued", network: "chonkbase", channel: "#soup", messageId: store.outgoingMessageId(user, outgoing.idempotency_key) });
-    expect((await (await mcp("tools/call", { name: "send_message", arguments: outgoing })).json()).result.structuredContent).toEqual(queued);
+    expect((await (await mcp("tools/call", { name: "get_message_status", arguments: { message_id: queued.messageId } })).json()).result.structuredContent.status).toBe("queued");
+    expect(store.searchPage(user, ["#soup"], "hello room", null, null).messages).toHaveLength(0);
+    const echoTime = new Date().toISOString();
+    store.recordActivity(user, { channel: "#soup", kind: "message", time: echoTime, observedAt: echoTime,
+      timestampSource: "server", nick: "alice", text: "hello room" });
+    const echoed = (await (await mcp("tools/call", { name: "get_message_status", arguments: { message_id: queued.messageId } })).json()).result.structuredContent;
+    expect(echoed.status).toBe("echoed");
+    expect(echoed.entryId).toStartWith("entry_");
+    expect(store.searchPage(user, ["#soup"], "hello room", null, null).messages).toHaveLength(1);
+    expect(store.searchPage(user, ["#soup"], "hello room", null, null).messages[0].messageId).toBe(queued.messageId);
+    const status = (await (await mcp("tools/call", { name: "get_irc_status", arguments: {} })).json()).result.structuredContent;
+    expect(status.nick).toBe("alice");
+    expect(status.upstreamConnected).toBeNull();
+    expect(status.lastReceived.entryId).toBe(echoed.entryId);
+    expect((await (await mcp("tools/call", { name: "send_message", arguments: outgoing })).json()).result.structuredContent.status).toBe("echoed");
     expect(sent).toEqual([["#soup", "hello room"]]);
     expect(store.db.query("SELECT count(*) AS count FROM audit").get().count).toBe(1);
     expect((await (await mcp("tools/call", { name: "send_message", arguments: { ...outgoing, text: "different" } })).json()).error.code).toBe(-32602);
@@ -437,7 +453,7 @@ test("MCP mention subscriptions verify callbacks, persist, filter, sign and unsu
       observedAt: time, timestampSource: "server", nick, text });
     activity("bob", "hello alice");
     activity("alice", "alice likes soup");
-    activity("bob", "hello alice, soup is ready");
+    const eventEntryId = activity("bob", "hello alice, soup is ready");
     expect(store.db.query("SELECT count(*) AS count FROM event_deliveries").get().count).toBe(1);
     store.close();
     store = new Store(path);
@@ -448,6 +464,9 @@ test("MCP mention subscriptions verify callbacks, persist, filter, sign and unsu
     expect(sent.name).toBe("message.mention");
     expect(sent.data.text).toBe("hello alice, soup is ready");
     expect(sent.data.channel).toBe("#soup");
+    expect(sent.data.entryId).toBe(eventEntryId);
+    expect(store.getHistory(store.userById(user.id), "#soup", null, 10).entries.some(entry =>
+      entry.entryId === sent.data.entryId)).toBe(true);
     expect(deliveries.at(-1).headers["webhook-id"]).toBe(sent.eventId);
     expect(store.db.query("SELECT count(*) AS count FROM event_deliveries").get().count).toBe(0);
     expect((await rpc("events/unsubscribe", { name: "message.mention", arguments: args,
@@ -505,6 +524,48 @@ test("event worker retries transient failures with one ID and drops a gone subsc
   } finally { store.close(); }
 });
 
+test("failed sends keep their identity and can be retried without changing the message ID", () => {
+  const store = new Store(":memory:");
+  try {
+    const user = store.invite("alice", ["#soup"], "chonkbase");
+    const key = "retry-send-123";
+    const messageId = store.outgoingMessageId(user, key);
+    expect(store.reservePost(user, key, "#soup", "hello")).toBe("new");
+    store.failPost(user, key, "channel_unavailable");
+    expect(store.postStatus(user, messageId).status).toBe("failed");
+    expect(store.reservePost(user, key, "#soup", "hello")).toBe("new");
+    expect(store.postStatus(user, messageId).messageId).toBe(messageId);
+    expect(store.reservePost(user, key, "#soup", "different")).toBe("conflict");
+    store.completePost(user, key);
+    expect(store.postStatus(user, messageId).status).toBe("queued");
+    expect(store.reservePost({ ...user, network_name: "other" }, key, "#soup", "hello")).toBe("conflict");
+  } finally { store.close(); }
+});
+
+test("startup backfills stable IDs in retained activity and pending unread batches", () => {
+  const dir = mkdtempSync(join(tmpdir(), "zircon-entry-migration-"));
+  const path = join(dir, "zircon.sqlite");
+  let store = new Store(path);
+  try {
+    const user = store.invite("alice", ["#soup"], "chonkbase");
+    const time = new Date().toISOString();
+    store.recordActivity(user, { channel: "#soup", kind: "message", time, observedAt: time,
+      timestampSource: "server", nick: "bob", text: "alice: hello" });
+    const batch = store.readUnread(user, "agent-a", "#soup", 10);
+    expect(batch.entries).toHaveLength(1);
+    store.db.run("UPDATE channel_activity SET entry_id=NULL");
+    store.db.query("UPDATE unread_batches SET entries=? WHERE id=?").run(JSON.stringify(batch.entries.map(({ entryId, messageId, ...entry }) => entry)), batch.batchId);
+    store.close();
+    store = new Store(path);
+    const restored = store.userById(user.id);
+    const pending = store.readUnread(restored, "agent-a", "#soup", 10);
+    const history = store.getHistory(restored, "#soup", null, 10);
+    expect(pending.batchId).toBe(batch.batchId);
+    expect(pending.entries[0].entryId).toBe(history.entries[0].entryId);
+    expect(pending.entries[0].messageId).toBeNull();
+  } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
 test("ZNC controlpanel provisions dynamically over one IRC listener", async () => {
   const seen = [];
   const server = net.createServer(socket => {
@@ -519,6 +580,16 @@ test("ZNC controlpanel provisions dynamically over one IRC listener", async () =
         if (!line.startsWith("PRIVMSG ")) continue;
         seen.push(line);
         const command = line.split(" :")[1].split(" ")[0];
+        if (command === "ListNetworks") {
+          for (const row of ["+---------+-------+------------+----------+----------+",
+            "| Network | OnIRC | IRC Server | IRC User | Channels |",
+            "+---------+-------+------------+----------+----------+",
+            "| primary | Yes | irc.chonkbase.net | test | 1 |",
+            "+---------+-------+------------+----------+----------+"]) {
+            socket.write(`:*controlpanel!x@znc.in PRIVMSG zirconctl :${row}\r\n`);
+          }
+          continue;
+        }
         const replies = { AddUser: "User ztest added!", Set: line.includes("AutoClearChanBuffer") ? "AutoClearChanBuffer = false" : line.includes("ChanBufferSize") ? "ChanBufferSize = 500" : "RealName = Zircon ChatGPT bridge for test", DelNetwork: "Error: User ztest does not have a network named [primary].",
           AddNetwork: "Network primary added to user ztest.", AddServer: "Added IRC Server irc.chonkbase.net +6697 to network primary for user ztest.",
           SetNetwork: "Nick = test", AddChan: "Channel #soup for user ztest added to network primary.",
@@ -535,5 +606,7 @@ test("ZNC controlpanel provisions dynamically over one IRC listener", async () =
     await runZncCommands(testConfig, commands);
     expect(seen).toHaveLength(commands.length);
     expect(seen.at(-1)).toBe("PRIVMSG *status :SaveConfig");
+    expect(await queryZncNetworkStatus(testConfig, { znc_username: "ztest" })).toBe(true);
+    expect(seen.at(-1)).toBe("PRIVMSG *controlpanel :ListNetworks ztest");
   } finally { server.close(); }
 });

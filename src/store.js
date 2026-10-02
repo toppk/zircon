@@ -78,6 +78,7 @@ export class Store {
       );
       CREATE TABLE IF NOT EXISTS channel_activity (
         id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL REFERENCES users(id),
+        entry_id TEXT UNIQUE, outgoing_message_id TEXT,
         network TEXT NOT NULL, channel TEXT NOT NULL, kind TEXT NOT NULL,
         time TEXT NOT NULL, observed_at TEXT NOT NULL, timestamp_source TEXT NOT NULL,
         nick TEXT NOT NULL, text TEXT NOT NULL, target TEXT,
@@ -111,7 +112,8 @@ export class Store {
         id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), client_id TEXT NOT NULL,
         name TEXT NOT NULL, arguments TEXT NOT NULL, url TEXT NOT NULL, secret TEXT NOT NULL,
         previous_secret TEXT, rotate_until INTEGER,
-        expires_at INTEGER, active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL
+        expires_at INTEGER, active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL,
+        last_attempt_at INTEGER, last_delivery_status TEXT
       );
       CREATE INDEX IF NOT EXISTS event_subscriptions_user ON event_subscriptions(user_id,active);
       CREATE TABLE IF NOT EXISTS event_deliveries (
@@ -123,7 +125,13 @@ export class Store {
       CREATE TABLE IF NOT EXISTS post_requests (
         user_id TEXT NOT NULL REFERENCES users(id), idempotency_key TEXT NOT NULL,
         channel TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL,
-        created_at INTEGER NOT NULL, PRIMARY KEY(user_id,idempotency_key)
+        created_at INTEGER NOT NULL, network TEXT, message_id TEXT,
+        echoed_at INTEGER, activity_entry_id TEXT, failure_reason TEXT,
+        PRIMARY KEY(user_id,idempotency_key)
+      );
+      CREATE TABLE IF NOT EXISTS capture_state (
+        user_id TEXT PRIMARY KEY REFERENCES users(id), last_activity_at TEXT,
+        last_message_at TEXT, last_disconnect_at TEXT, last_auth_at TEXT
       );
       CREATE TABLE IF NOT EXISTS diagnostic_events (
         id INTEGER PRIMARY KEY AUTOINCREMENT, occurred_at INTEGER NOT NULL,
@@ -148,9 +156,41 @@ export class Store {
     const clientColumns = this.db.query("PRAGMA table_info(oauth_clients)").all().map(column => column.name);
     if (!clientColumns.includes("auth_method")) this.db.run("ALTER TABLE oauth_clients ADD COLUMN auth_method TEXT NOT NULL DEFAULT 'none'");
     if (!clientColumns.includes("secret_hash")) this.db.run("ALTER TABLE oauth_clients ADD COLUMN secret_hash TEXT");
+    const activityColumns = this.db.query("PRAGMA table_info(channel_activity)").all().map(column => column.name);
+    if (!activityColumns.includes("entry_id")) this.db.run("ALTER TABLE channel_activity ADD COLUMN entry_id TEXT");
+    if (!activityColumns.includes("outgoing_message_id")) this.db.run("ALTER TABLE channel_activity ADD COLUMN outgoing_message_id TEXT");
+    this.db.run("UPDATE channel_activity SET entry_id='entry_' || lower(hex(randomblob(16))) WHERE entry_id IS NULL");
+    this.db.run("CREATE UNIQUE INDEX IF NOT EXISTS activity_entry_id ON channel_activity(entry_id)");
+    const postColumns = this.db.query("PRAGMA table_info(post_requests)").all().map(column => column.name);
+    for (const [name, type] of [["network", "TEXT"], ["message_id", "TEXT"], ["echoed_at", "INTEGER"],
+      ["activity_entry_id", "TEXT"], ["failure_reason", "TEXT"]]) {
+      if (!postColumns.includes(name)) this.db.run(`ALTER TABLE post_requests ADD COLUMN ${name} ${type}`);
+    }
+    for (const row of this.db.query("SELECT user_id,idempotency_key FROM post_requests WHERE message_id IS NULL").all()) {
+      this.db.query("UPDATE post_requests SET message_id=? WHERE user_id=? AND idempotency_key=?")
+        .run(this.outgoingMessageId({ id: row.user_id }, row.idempotency_key), row.user_id, row.idempotency_key);
+    }
+    this.db.run("CREATE UNIQUE INDEX IF NOT EXISTS post_requests_message_id ON post_requests(user_id,message_id)");
+    this.db.run(`UPDATE post_requests SET network=(SELECT network_name FROM users WHERE users.id=post_requests.user_id) WHERE network IS NULL`);
     const subscriptionColumns = this.db.query("PRAGMA table_info(event_subscriptions)").all().map(column => column.name);
     if (!subscriptionColumns.includes("previous_secret")) this.db.run("ALTER TABLE event_subscriptions ADD COLUMN previous_secret TEXT");
     if (!subscriptionColumns.includes("rotate_until")) this.db.run("ALTER TABLE event_subscriptions ADD COLUMN rotate_until INTEGER");
+    if (!subscriptionColumns.includes("last_attempt_at")) this.db.run("ALTER TABLE event_subscriptions ADD COLUMN last_attempt_at INTEGER");
+    if (!subscriptionColumns.includes("last_delivery_status")) this.db.run("ALTER TABLE event_subscriptions ADD COLUMN last_delivery_status TEXT");
+    for (const batch of this.db.query("SELECT id,user_id,network,channel,entries FROM unread_batches").all()) {
+      const entries = JSON.parse(batch.entries);
+      if (entries.every(entry => entry.entryId)) continue;
+      for (const entry of entries) {
+        if (entry.entryId) continue;
+        const row = this.db.query(`SELECT entry_id,outgoing_message_id FROM channel_activity
+          WHERE user_id=? AND network=? AND channel=? AND kind=? AND time=? AND nick=? AND text=?
+          AND target IS ? LIMIT 1`).get(batch.user_id, batch.network, batch.channel,
+            entry.kind, entry.time, entry.nick, entry.text, entry.target);
+        entry.entryId = row?.entry_id ?? `entry_${randomBytes(16).toString("hex")}`;
+        entry.messageId = row?.outgoing_message_id ?? null;
+      }
+      this.db.query("UPDATE unread_batches SET entries=? WHERE id=?").run(JSON.stringify(entries), batch.id);
+    }
     this.db.run("DELETE FROM github_states WHERE expires_at < ?", [now()]);
     this.db.run("DELETE FROM sessions WHERE expires_at < ?", [now()]);
     this.db.run("DELETE FROM auth_requests WHERE expires_at < ?", [now()]);
@@ -376,23 +416,41 @@ export class Store {
 
   reservePost(user, key, channel, message) {
     return this.db.transaction(() => {
-      const existing = this.db.query("SELECT channel,text,status FROM post_requests WHERE user_id = ? AND idempotency_key = ?")
+      const existing = this.db.query("SELECT network,channel,text,status FROM post_requests WHERE user_id = ? AND idempotency_key = ?")
         .get(user.id, key);
-      if (existing) return existing.channel === channel && existing.text === message ? existing.status : "conflict";
-      this.db.query("INSERT INTO post_requests VALUES (?,?,?,?,?,?)")
-        .run(user.id, key, channel, message, "pending", now());
+      if (existing) {
+        if (existing.network !== user.network_name || existing.channel !== channel || existing.text !== message) return "conflict";
+        if (existing.status === "failed") {
+          this.db.query("UPDATE post_requests SET status='pending',failure_reason=NULL,created_at=? WHERE user_id=? AND idempotency_key=?")
+            .run(now(), user.id, key);
+          return "new";
+        }
+        return existing.status;
+      }
+      this.db.query(`INSERT INTO post_requests
+        (user_id,idempotency_key,channel,text,status,created_at,network,message_id)
+        VALUES (?,?,?,?,?,?,?,?)`)
+        .run(user.id, key, channel, message, "pending", now(), user.network_name, this.outgoingMessageId(user, key));
       return "new";
     })();
   }
 
   completePost(user, key) {
-    this.db.query("UPDATE post_requests SET status = 'queued' WHERE user_id = ? AND idempotency_key = ?")
+    this.db.query("UPDATE post_requests SET status = 'queued' WHERE user_id = ? AND idempotency_key = ? AND status='pending'")
       .run(user.id, key);
   }
 
-  cancelPost(user, key) {
-    this.db.query("DELETE FROM post_requests WHERE user_id = ? AND idempotency_key = ? AND status = 'pending'")
-      .run(user.id, key);
+  failPost(user, key, reason) {
+    this.db.query("UPDATE post_requests SET status='failed',failure_reason=? WHERE user_id=? AND idempotency_key=? AND status='pending'")
+      .run(reason, user.id, key);
+  }
+
+  postStatus(user, messageId) {
+    const post = this.db.query(`SELECT message_id AS messageId,network,channel,status,created_at AS createdAt,
+      echoed_at AS echoedAt,activity_entry_id AS entryId,failure_reason AS failureReason
+      FROM post_requests WHERE user_id=? AND message_id=?`).get(user.id, messageId);
+    return post ? { ...post, createdAt: new Date(post.createdAt).toISOString(),
+      echoedAt: post.echoedAt === null ? null : new Date(post.echoedAt).toISOString() } : null;
   }
 
   recordActivity(user, event) {
@@ -400,16 +458,74 @@ export class Store {
       user.id, user.network_name, event.channel.toLowerCase(), event.kind, event.time,
       event.nick.toLowerCase(), event.text, event.target ?? null,
     ])).digest("hex");
+    let entryId = null;
     this.db.transaction(() => {
+      const proposedId = `entry_${randomBytes(16).toString("hex")}`;
       const inserted = this.db.query(`INSERT OR IGNORE INTO channel_activity
-        (user_id,network,channel,kind,time,observed_at,timestamp_source,nick,text,target,fingerprint)
-        VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-        .run(user.id, user.network_name, event.channel.toLowerCase(), event.kind, event.time,
+        (entry_id,user_id,network,channel,kind,time,observed_at,timestamp_source,nick,text,target,fingerprint)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(proposedId, user.id, user.network_name, event.channel.toLowerCase(), event.kind, event.time,
           event.observedAt, event.timestampSource, event.nick, event.text, event.target ?? null, fingerprint);
-      if (inserted.changes) this.enqueueMentionEvents(user, event);
+      entryId = inserted.changes ? proposedId : this.db.query("SELECT entry_id FROM channel_activity WHERE fingerprint=?").get(fingerprint)?.entry_id ?? null;
+      if (!inserted.changes) return;
+      if (event.timestampSource !== "local") {
+        this.db.query(`INSERT INTO capture_state(user_id,last_activity_at,last_message_at) VALUES (?,?,?)
+          ON CONFLICT(user_id) DO UPDATE SET last_activity_at=excluded.last_activity_at,
+          last_message_at=CASE WHEN ? IN ('message','action') THEN excluded.last_message_at ELSE capture_state.last_message_at END`)
+          .run(user.id, event.observedAt, ["message", "action"].includes(event.kind) ? event.observedAt : null, event.kind);
+      }
+      if (event.kind === "message" && event.timestampSource !== "local" && event.nick.toLowerCase() === user.nick.toLowerCase()) {
+        const eventTime = Date.parse(event.time);
+        const post = this.db.query(`SELECT idempotency_key,message_id FROM post_requests
+          WHERE user_id=? AND network=? AND lower(channel)=? AND text=? AND status='queued'
+          AND created_at BETWEEN ? AND ? ORDER BY created_at LIMIT 1`)
+          .get(user.id, user.network_name, event.channel.toLowerCase(), event.text,
+            eventTime - 120_000, eventTime + 120_000);
+        if (post) {
+          this.db.query(`UPDATE post_requests SET status='echoed',echoed_at=?,activity_entry_id=?
+            WHERE user_id=? AND idempotency_key=?`).run(Date.parse(event.observedAt), entryId, user.id, post.idempotency_key);
+          this.db.query("UPDATE channel_activity SET outgoing_message_id=? WHERE entry_id=?").run(post.message_id, entryId);
+        }
+      }
+      this.enqueueMentionEvents(user, event, entryId);
     })();
     this.historyRecorded = (this.historyRecorded ?? 0) + 1;
     if (this.historyRecorded % 100 === 0) this.pruneActivity();
+    return entryId;
+  }
+
+  recordConnectionState(user, state) {
+    const stamp = new Date().toISOString();
+    if (state === "znc_disconnected" || state === "go_offline") {
+      this.db.query(`INSERT INTO capture_state(user_id,last_disconnect_at) VALUES (?,?)
+        ON CONFLICT(user_id) DO UPDATE SET last_disconnect_at=excluded.last_disconnect_at`).run(user.id, stamp);
+    } else if (state === "znc_authenticated") {
+      this.db.query(`INSERT INTO capture_state(user_id,last_auth_at) VALUES (?,?)
+        ON CONFLICT(user_id) DO UPDATE SET last_auth_at=excluded.last_auth_at`).run(user.id, stamp);
+    }
+    this.recordDiagnostic(user, "irc", state);
+  }
+
+  captureStatus(user) {
+    const state = this.db.query("SELECT last_activity_at AS lastActivityAt,last_message_at AS lastMessageAt,last_disconnect_at AS lastDisconnectAt,last_auth_at AS lastAuthenticatedAt FROM capture_state WHERE user_id=?")
+      .get(user.id) ?? { lastActivityAt: null, lastMessageAt: null, lastDisconnectAt: null, lastAuthenticatedAt: null };
+    const subscriptions = this.db.query(`SELECT count(*) AS count,max(last_attempt_at) AS lastAttemptAt
+      FROM event_subscriptions WHERE user_id=? AND active=1 AND (expires_at IS NULL OR expires_at>?)`)
+      .get(user.id, now());
+    const lastDelivery = this.db.query(`SELECT last_delivery_status AS status FROM event_subscriptions
+      WHERE user_id=? AND last_attempt_at IS NOT NULL ORDER BY last_attempt_at DESC LIMIT 1`).get(user.id);
+    const pending = this.db.query(`SELECT count(*) AS count FROM event_deliveries d
+      JOIN event_subscriptions s ON s.id=d.subscription_id WHERE s.user_id=?`).get(user.id).count;
+    const channels = JSON.parse(user.selected_channels).map(channel => channel.toLowerCase());
+    const lastReceived = channels.length ? this.db.query(`SELECT entry_id AS entryId,kind,channel,
+      observed_at AS observedAt FROM channel_activity WHERE user_id=? AND network=?
+      AND channel IN (${channels.map(() => "?").join(",")}) AND timestamp_source!='local'
+      ORDER BY observed_at DESC,id DESC LIMIT 1`).get(user.id, user.network_name, ...channels) : null;
+    return { ...state, activeSubscriptions: subscriptions.count, pendingDeliveries: pending,
+      lastReceived,
+      lastEventAttemptAt: subscriptions.lastAttemptAt === null ? null : new Date(subscriptions.lastAttemptAt).toISOString(),
+      lastEventDeliveryStatus: lastDelivery?.status ?? null,
+      captureGapPossibleSince: state.lastDisconnectAt };
   }
 
   eventSubscriptionId(user, clientId, name, args, url) {
@@ -454,7 +570,7 @@ export class Store {
         expiresAt: row.expiresAt === null ? null : new Date(row.expiresAt).toISOString() }));
   }
 
-  enqueueMentionEvents(user, event) {
+  enqueueMentionEvents(user, event, entryId) {
     if (!["message", "action"].includes(event.kind) || event.nick.toLowerCase() === user.nick.toLowerCase() ||
         event.timestampSource === "local") return;
     if (!addressesNick(event.text, user.nick)) return;
@@ -477,7 +593,8 @@ export class Store {
       if (queued >= 1000) { this.recordDiagnostic(user, "event", "queue_full", subscription.id); continue; }
       const payload = JSON.stringify({ eventId: `evt_${randomToken()}`, name: "message.mention",
         timestamp: event.time, data: { network: user.network_name, channel: event.channel,
-          sender: event.nick, text: event.text, kind: event.kind, observedAt: event.observedAt }, cursor: null });
+          sender: event.nick, text: event.text, kind: event.kind, observedAt: event.observedAt,
+          entryId }, cursor: null });
       if (Buffer.byteLength(payload) > 256 * 1024) continue;
       const eventId = JSON.parse(payload).eventId;
       this.db.query(`INSERT INTO event_deliveries(event_id,subscription_id,payload,next_attempt_at,created_at)
@@ -490,6 +607,11 @@ export class Store {
     return this.db.query(`SELECT d.*,s.url,s.secret,s.previous_secret,s.rotate_until,s.user_id,s.client_id,s.name,s.arguments,s.expires_at
       FROM event_deliveries d JOIN event_subscriptions s ON s.id=d.subscription_id
       WHERE d.next_attempt_at<=? ORDER BY d.next_attempt_at,d.created_at LIMIT 1`).get(now());
+  }
+
+  recordEventAttempt(subscriptionId, status) {
+    this.db.query("UPDATE event_subscriptions SET last_attempt_at=?,last_delivery_status=? WHERE id=?")
+      .run(now(), status, subscriptionId);
   }
 
   finishEventDelivery(eventId, status) {
@@ -519,7 +641,8 @@ export class Store {
       WHERE d.occurred_at >= ? ORDER BY d.occurred_at DESC,d.id DESC LIMIT ?`).all(Date.parse(sinceTime), limit)
       .map(row => ({ source: "diagnostic", time: new Date(row.occurred_at).toISOString(), user: row.user,
         category: row.category, action: row.action, result: row.result }));
-    const activity = this.db.query(`SELECT a.time,a.observed_at AS observedAt,a.timestamp_source AS timestampSource,
+    const activity = this.db.query(`SELECT a.entry_id AS entryId,a.outgoing_message_id AS messageId,
+      a.time,a.observed_at AS observedAt,a.timestamp_source AS timestampSource,
       a.network,a.channel,a.kind,a.nick,a.text,u.github_login AS user
       FROM channel_activity a LEFT JOIN users u ON u.id=a.user_id
       WHERE a.observed_at >= ? ORDER BY a.observed_at DESC,a.id DESC LIMIT ?`).all(sinceTime, limit)
@@ -529,7 +652,8 @@ export class Store {
   }
 
   recentActivity(user, channel, limit = 50) {
-    return this.db.query(`SELECT id,network,channel,kind,time,observed_at AS observedAt,
+    return this.db.query(`SELECT id,entry_id AS entryId,outgoing_message_id AS messageId,
+      network,channel,kind,time,observed_at AS observedAt,
       timestamp_source AS timestampSource,nick,text,target FROM channel_activity
       WHERE user_id = ? AND network = ? AND channel = ? ORDER BY time DESC,id DESC LIMIT ?`)
       .all(user.id, user.network_name, channel.toLowerCase(), limit).reverse();
@@ -552,7 +676,8 @@ export class Store {
       if (pending) return { batchId: pending.id, entries: JSON.parse(pending.entries), hasMore: Boolean(pending.has_more) };
       const cursor = this.db.query(`SELECT last_id FROM unread_cursors WHERE user_id=? AND client_id=? AND network=? AND channel=?`)
         .get(user.id, clientId, network, normalized)?.last_id ?? 0;
-      const rows = this.db.query(`SELECT id,network,channel,kind,time,observed_at AS observedAt,
+      const rows = this.db.query(`SELECT id,entry_id AS entryId,outgoing_message_id AS messageId,
+        network,channel,kind,time,observed_at AS observedAt,
         timestamp_source AS timestampSource,nick,text,target FROM channel_activity
         WHERE user_id=? AND network=? AND channel=? AND id>? ORDER BY id LIMIT ?`)
         .all(user.id, network, normalized, cursor, limit);
@@ -590,7 +715,8 @@ export class Store {
   getHistory(user, channel, before = null, limit = 50) {
     const boundary = parsePageCursor(before);
     if (boundary === false) return null;
-    const rows = this.db.query(`SELECT id,network,channel,kind,time,observed_at AS observedAt,
+    const rows = this.db.query(`SELECT id,entry_id AS entryId,outgoing_message_id AS messageId,
+      network,channel,kind,time,observed_at AS observedAt,
       timestamp_source AS timestampSource,nick,text,target FROM channel_activity
       WHERE user_id=? AND network=? AND channel=? AND
         (? IS NULL OR time < ? OR (time = ? AND id < ?))
@@ -605,7 +731,8 @@ export class Store {
   searchActivity(user, channels, query, since, until, limit = 50) {
     if (!channels.length) return [];
     const placeholders = channels.map(() => "?").join(",");
-    return this.db.query(`SELECT a.id,a.network,a.channel,a.kind,a.time,a.observed_at AS observedAt,
+    return this.db.query(`SELECT a.id,a.entry_id AS entryId,a.outgoing_message_id AS messageId,
+      a.network,a.channel,a.kind,a.time,a.observed_at AS observedAt,
       a.timestamp_source AS timestampSource,a.nick,a.text,a.target FROM activity_fts f
       JOIN channel_activity a ON a.id = f.rowid WHERE activity_fts MATCH ? AND a.user_id = ?
       AND a.network = ? AND a.channel IN (${placeholders}) AND a.kind IN ('message','action')
@@ -620,7 +747,8 @@ export class Store {
     if (boundary === false) return null;
     if (!channels.length) return { messages: [], nextBefore: null };
     const placeholders = channels.map(() => "?").join(",");
-    const rows = this.db.query(`SELECT a.id,a.network,a.channel,a.kind,a.time,a.observed_at AS observedAt,
+    const rows = this.db.query(`SELECT a.id,a.entry_id AS entryId,a.outgoing_message_id AS messageId,
+      a.network,a.channel,a.kind,a.time,a.observed_at AS observedAt,
       a.timestamp_source AS timestampSource,a.nick,a.text,a.target FROM activity_fts f
       JOIN channel_activity a ON a.id=f.rowid WHERE activity_fts MATCH ? AND a.user_id=?
       AND a.network=? AND a.channel IN (${placeholders}) AND a.kind IN ('message','action')
