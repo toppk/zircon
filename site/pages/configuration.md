@@ -39,7 +39,7 @@ services.zircon = {
 | `settings.ircUsername` | `zircon` | IRC username (ident) |
 | `settings.ircRealname` | `Zircon ChatGPT bridge` | prefix for each user's IRC real name; their GitHub login is appended |
 | `settings.ircChannels` | required | channels the owner may grant |
-| `settings.diagnosticsAdminLogins` | `[]` | GitHub logins that can view diagnostics with a browser session |
+| `settings.diagnosticsAdminLogins` | `[]` | owner GitHub logins that can view diagnostics and manage user channel grants with a browser session |
 
 The service runs with `DynamicUser`, `StateDirectory=zircon`,
 `ProtectSystem=strict`, no capabilities, and logs to stdout.

@@ -21,8 +21,9 @@ function redirect(location, headers = {}) {
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 }
-function page(title, body, formOrigins = []) {
+function page(title, body, formOrigins = [], status = 200) {
   return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(title)}</title><link rel="icon" href="/logo.png" type="image/png"><link rel="stylesheet" href="/ui.css"></head><body><main><div class="brand"><img src="/logo.png" width="42" height="42" alt="">Zircon IRC</div><h1>${escapeHtml(title)}</h1>${body}</main></body></html>`, {
+    status,
     headers: {
       "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
       "Content-Security-Policy": `default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'${formOrigins.length ? ` ${formOrigins.join(" ")}` : ""}; frame-ancestors 'none'; base-uri 'none'`,
@@ -92,6 +93,30 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
     const session = cookieValue(request);
     return session && sameOrigin(request, base) && equal(form.get("csrf"), csrf(config, session));
   };
+  const isOwner = user => user && config.diagnosticsAdminLogins?.includes(user.github_login);
+  const saveInvite = async (login, channels) => {
+    if (!/^[a-z0-9-]{1,39}$/.test(login) || !Array.isArray(channels) ||
+        channels.some(channel => typeof channel !== "string" || !config.ircChannels.includes(channel))) {
+      return { error: "Invalid GitHub username or channel grants", status: 400 };
+    }
+    if (!channels.length && !store.userByLogin(login)) return { error: "Grant at least one channel to invite a person", status: 400 };
+    if (!store.userByLogin(login) && store.userCount() >= (config.maxUsers ?? 16)) {
+      return { error: "User limit reached", status: 409 };
+    }
+    const previous = store.userByLogin(login);
+    const user = store.invite(login, [...new Set(channels)], config.ircNetworks[0].name);
+    if (previous && previous.selected_channels !== user.selected_channels) {
+      pool.drop(user.id);
+      if (user.online) {
+        try { await pool.forUser(user); }
+        catch (error) {
+          console.error("Could not apply updated channel grant:", error.message);
+          return { error: "Invitation saved, but IRC setup is pending", status: 503 };
+        }
+      }
+    }
+    return { user, status: 201 };
+  };
 
   return async request => {
     const url = new URL(request.url, base);
@@ -135,7 +160,7 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
     if (path === "/admin/events" && request.method === "GET") {
       if (!config.diagnosticsEnabled) return json({ error: "Not found" }, 404);
       const browserUser = sessionUser(request);
-      const allowedSession = browserUser && config.diagnosticsAdminLogins?.includes(browserUser.github_login);
+      const allowedSession = isOwner(browserUser);
       const allowedToken = equal(request.headers.get("authorization") ?? "", `Bearer ${config.adminToken}`);
       if (!allowedSession && !allowedToken) return json({ error: "Unauthorized" }, 401);
       const rawLimit = url.searchParams.get("limit") ?? "50";
@@ -289,8 +314,21 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
       const enabledChannels = new Set([...selected].map(channel => channel.toLowerCase()));
       const options = allowed.map(channel => `<label><input type="checkbox" name="channel" value="${escapeHtml(channel)}" ${selected.has(channel) ? "checked" : ""}>${escapeHtml(channel)}</label>`).join("<br>");
       const networks = config.ircNetworks.map(network => `<option value="${escapeHtml(network.name)}" ${network.name === user.network_name ? "selected" : ""}>${escapeHtml(network.name)} (${escapeHtml(network.host)})</option>`).join("");
-      const diagnosticsLink = config.diagnosticsEnabled && config.diagnosticsAdminLogins?.includes(user.github_login)
+      const diagnosticsLink = config.diagnosticsEnabled && isOwner(user)
         ? '<p><a href="/admin/events">View recent diagnostics</a></p>' : "";
+      const grantOptions = selectedChannels => config.ircChannels.map(channel =>
+        `<label><input type="checkbox" name="channel" value="${escapeHtml(channel)}" ${selectedChannels.includes(channel) ? "checked" : ""}>${escapeHtml(channel)}</label>`).join("");
+      const ownerPanel = isOwner(user) ? `<section class="owner-users"><h2>People with access</h2><p>${store.userCount()} of ${config.maxUsers ?? 16} places used. Grant channels to a GitHub username; each person chooses which granted channels to enable. Saving grants for an existing person replaces their current grants. Uncheck every channel to remove their IRC access.</p>
+        ${url.searchParams.get("users") === "saved" ? '<p class="notice" role="status">Channel grants saved.</p>' : ""}
+        <form method="post" action="/settings/users"><input type="hidden" name="csrf" value="${csrf(config, cookieValue(request))}">
+          <label>Invite GitHub username <input name="github_login" maxlength="39" autocomplete="off" required></label>
+          <fieldset><legend>Channels to grant</legend>${grantOptions([])}</fieldset><button class="button-primary">Invite person</button></form>
+        <h3>Current people</h3><ul class="user-list">${store.listUsers().map(person => `<li><form method="post" action="/settings/users">
+          <input type="hidden" name="csrf" value="${csrf(config, cookieValue(request))}"><input type="hidden" name="github_login" value="${escapeHtml(person.githubLogin)}">
+          <strong>${escapeHtml(person.githubLogin)}</strong> <span>${person.githubId ? "signed in" : "invited"} · ${escapeHtml(person.network)} · ${escapeHtml(person.nick)}${person.githubId ? ` · ${person.online ? "online requested" : "offline requested"}` : ""}</span>
+          <fieldset><legend>Granted channels</legend>${grantOptions(person.allowedChannels)}</fieldset>
+          <span class="selected-channels">Enabled: ${person.selectedChannels.length ? escapeHtml(person.selectedChannels.join(", ")) : "none"}</span>
+          <button>Save grants</button></form></li>`).join("")}</ul></section>` : "";
       const subscriptions = store.listEventSubscriptions(user).map(subscription => `<li><strong>${escapeHtml(subscription.name)}</strong> ${escapeHtml(JSON.stringify(subscription.arguments))}${subscription.arguments.network && subscription.arguments.network !== user.network_name
         ? " <em>(paused: network changed)</em>"
         : subscription.arguments.channel
@@ -303,7 +341,7 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
         <label>IRC nick <input name="nick" maxlength="31" value="${escapeHtml(user.nick)}" required></label>
         <label>IRC display name <input name="display_name" maxlength="32" value="${escapeHtml(user.display_name)}" required></label>
         <fieldset><legend>Channels enabled in ChatGPT</legend><p>New channels start off. Select a granted channel to join it and let ChatGPT read and post there.</p>${options}</fieldset><button>Save</button></form>
-        <h2>Event subscriptions</h2><p>ChatGPT can receive new mentions while IRC is online. A subscription filtered to one channel stays there when you change channels; one without a channel filter follows all channels you enable. Revoking a subscription stops future deliveries.</p><ul>${subscriptions || "<li>No active subscriptions</li>"}</ul>`);
+        <h2>Event subscriptions</h2><p>ChatGPT can receive new mentions while IRC is online. A subscription filtered to one channel stays there when you change channels; one without a channel filter follows all channels you enable. Revoking a subscription stops future deliveries.</p><ul>${subscriptions || "<li>No active subscriptions</li>"}</ul>${ownerPanel}`);
     }
     if (path === "/settings/subscriptions/revoke" && request.method === "POST") {
       const user = sessionUser(request);
@@ -314,6 +352,17 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
         return json({ error: "Unknown subscription" }, 404);
       }
       return redirect(`${base}/settings`);
+    }
+    if (path === "/settings/users" && request.method === "POST") {
+      const user = sessionUser(request);
+      if (!isOwner(user)) return json({ error: "Forbidden" }, 403);
+      const form = await request.formData();
+      if (!requireCsrf(request, form)) return json({ error: "Forbidden" }, 403);
+      if (!store.allowRate("admin-invite", 30, 3600_000)) return page("Too many invitations", "<p>Please try again later.</p><p><a href=\"/settings\">Back to settings</a></p>", [], 429);
+      const login = String(form.get("github_login") ?? "").trim().toLowerCase();
+      const result = await saveInvite(login, form.getAll("channel"));
+      if (result.error) return page("Could not save grants", `<p>${escapeHtml(result.error)}</p><p><a href="/settings">Back to settings</a></p>`, [], result.status);
+      return redirect(`${base}/settings?users=saved`);
     }
     if (path === "/settings" && request.method === "POST") {
       const user = sessionUser(request);
@@ -356,23 +405,10 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
       let body;
       try { body = await request.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
       const login = typeof body.github_login === "string" ? body.github_login.trim().toLowerCase() : "";
-      const channels = body.channels ?? config.ircChannels;
-      if (!/^[a-z0-9-]{1,39}$/.test(login) || !Array.isArray(channels) || !channels.length ||
-          channels.some(channel => !config.ircChannels.includes(channel))) return json({ error: "Invalid invite" }, 400);
-      if (!store.userByLogin(login) && store.userCount() >= (config.maxUsers ?? 16)) return json({ error: "User limit reached" }, 409);
-      const previous = store.userByLogin(login);
-      const user = store.invite(login, [...new Set(channels)], config.ircNetworks[0].name);
-      if (previous && previous.selected_channels !== user.selected_channels) {
-        pool.drop(user.id);
-        if (user.online) {
-          try { await pool.forUser(user); }
-          catch (error) {
-            console.error("Could not apply updated channel grant:", error.message);
-            return json({ error: "Invitation saved, but IRC setup is pending" }, 503);
-          }
-        }
-      }
-      return json({ github_login: user.github_login, allowed_channels: JSON.parse(user.allowed_channels) }, 201);
+      const result = await saveInvite(login, body.channels ?? config.ircChannels);
+      if (result.error) return json({ error: result.error }, result.status);
+      return json({ github_login: result.user.github_login,
+        allowed_channels: JSON.parse(result.user.allowed_channels) }, 201);
     }
 
     return null;

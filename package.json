@@ -1,6 +1,6 @@
 {
   "name": "zircon-irc",
-  "version": "0.7.3",
+  "version": "0.7.4",
   "private": true,
   "scripts": {
     "start": "bun run src/index.js",

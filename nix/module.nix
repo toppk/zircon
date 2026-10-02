@@ -49,7 +49,7 @@ in {
         ircUsername = mkOption { type = types.str; default = "zircon"; };
         ircRealname = mkOption { type = types.str; default = "Zircon ChatGPT bridge"; };
         ircChannels = mkOption { type = types.listOf types.str; default = []; };
-        diagnosticsAdminLogins = mkOption { type = types.listOf types.str; default = []; description = "GitHub logins permitted to view diagnostics with a signed-in browser session."; };
+        diagnosticsAdminLogins = mkOption { type = types.listOf types.str; default = []; description = "Owner GitHub logins permitted to view diagnostics and manage user channel grants with a signed-in browser session."; };
       }; };
     };
   };

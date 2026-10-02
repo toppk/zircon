@@ -281,7 +281,7 @@ test("MCP discovery, OAuth, history, posting and presence tools", async () => {
     expect(status.upstreamConnected).toBeNull();
     expect(status.lastReceived.entryId).toBe(echoed.entryId);
     expect(status.channels[0].lastAcknowledged.entryId).toBe(unread.entries.at(-1).entryId);
-    expect(status.version).toBe("0.7.3");
+    expect(status.version).toBe("0.7.4");
     const lastHour = (await (await mcp("tools/call", { name: "read_history", arguments: { channel: "#soup", mode: "last_hour" } })).json()).result.structuredContent;
     expect(lastHour.entries.some(item => item.entryId === echoed.entryId)).toBe(true);
     expect((await (await mcp("tools/call", { name: "send_message", arguments: outgoing })).json()).result.structuredContent.status).toBe("echoed");
@@ -329,6 +329,52 @@ test("owner diagnostics show bounded IRC activity and MCP calls without exposing
     expect((await req("/admin/events?limit=1", { headers: { Authorization: "Bearer admin-secret" } })).status).toBe(200);
     const disabled = createHandler({ ...config, diagnosticsEnabled: false }, {}, store, async () => null);
     expect((await disabled(new Request(`${base}/admin/events`))).status).toBe(404);
+  } finally { store.close(); }
+});
+
+test("owner settings list users and manage channel grants without exposing the admin token", async () => {
+  const ownerConfig = { ...config, diagnosticsAdminLogins: ["alice"] };
+  const store = new Store(":memory:");
+  const dropped = [];
+  const reconnected = [];
+  const pool = { drop: id => dropped.push(id), forUser: async user => reconnected.push(user.id) };
+  try {
+    const owner = inviteWithChannels(store, "alice");
+    const outsider = inviteWithChannels(store, "bob");
+    const handle = createHandler(ownerConfig, pool, store, async () => null);
+    const request = (path, init = {}) => handle(new Request(new URL(path, base), init));
+    const ownerCookie = `__Host-zircon_session=${store.createSession(owner.id)}`;
+    const outsiderCookie = `__Host-zircon_session=${store.createSession(outsider.id)}`;
+    const settings = await request("/settings", { headers: { Cookie: ownerCookie } });
+    const html = await settings.text();
+    expect(html).toContain("People with access");
+    expect(html).toContain("bob");
+    expect(html).not.toContain(ownerConfig.adminToken);
+    const csrf = html.match(/name="csrf" value="([^"]+)"/)[1];
+    expect(await (await request("/settings", { headers: { Cookie: outsiderCookie } })).text()).not.toContain("People with access");
+    const post = (cookie, fields, origin = base) => {
+      const body = new URLSearchParams();
+      for (const [key, value] of Object.entries(fields)) {
+        for (const item of Array.isArray(value) ? value : [value]) body.append(key, item);
+      }
+      return request("/settings/users", { method: "POST",
+        headers: { Cookie: cookie, Origin: origin, "Content-Type": "application/x-www-form-urlencoded" }, body });
+    };
+    const invite = { csrf, github_login: "Carol", channel: ["#soup", "#other"] };
+    expect((await post(outsiderCookie, invite)).status).toBe(403);
+    expect((await post(ownerCookie, { ...invite, csrf: "wrong" })).status).toBe(403);
+    expect((await post(ownerCookie, invite, "https://other.example.com")).status).toBe(403);
+    expect((await post(ownerCookie, { ...invite, channel: ["#unknown"] })).status).toBe(400);
+    expect((await post(ownerCookie, invite)).status).toBe(303);
+    expect(JSON.parse(store.userByLogin("carol").allowed_channels)).toEqual(["#soup", "#other"]);
+    expect(JSON.parse(store.userByLogin("carol").selected_channels)).toEqual([]);
+    store.updateSettings(outsider.id, outsider.display_name, ["#soup"], outsider.network_name, outsider.nick);
+    store.setOnline(outsider.id, true);
+    expect((await post(ownerCookie, { csrf, github_login: "bob" })).status).toBe(303);
+    expect(JSON.parse(store.userByLogin("bob").allowed_channels)).toEqual([]);
+    expect(JSON.parse(store.userByLogin("bob").selected_channels)).toEqual([]);
+    expect(dropped).toContain(outsider.id);
+    expect(reconnected).toContain(outsider.id);
   } finally { store.close(); }
 });
 

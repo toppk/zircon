@@ -249,6 +249,13 @@ export class Store {
   activeUsers() { return this.db.query("SELECT * FROM users WHERE enabled = 1 AND github_id IS NOT NULL AND online = 1 ORDER BY created_at").all(); }
   setOnline(userId, online) { this.db.query("UPDATE users SET online = ? WHERE id = ? AND enabled = 1").run(online ? 1 : 0, userId); }
   userCount() { return this.db.query("SELECT count(*) AS count FROM users WHERE enabled = 1").get().count; }
+  listUsers() {
+    return this.db.query(`SELECT github_login AS githubLogin,github_id AS githubId,
+      allowed_channels AS allowedChannels,selected_channels AS selectedChannels,
+      network_name AS network,nick,online FROM users WHERE enabled=1 ORDER BY github_login`).all()
+      .map(row => ({ ...row, allowedChannels: JSON.parse(row.allowedChannels),
+        selectedChannels: JSON.parse(row.selectedChannels) }));
+  }
 
   githubUser(githubId, login) {
     const existing = this.db.query("SELECT * FROM users WHERE github_id = ? AND enabled = 1").get(String(githubId));
