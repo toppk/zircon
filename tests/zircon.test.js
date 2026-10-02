@@ -107,6 +107,76 @@ test("GitHub invite, consent, PKCE, API, refresh and revocation", async () => {
   } finally { store.close(); }
 });
 
+test("MCP discovery, dynamic client registration, PKCE, resource binding and read tools", async () => {
+  const store = new Store(":memory:");
+  const irc = { messages: (channel, limit) => [{ time: "2026-10-01T00:00:00.000Z", channel, nick: "bob", text: "hello" }].slice(-limit) };
+  const pool = { forUser: async () => irc };
+  const handle = createHandler(config, pool, store, async () => null);
+  const req = (path, init = {}) => handle(new Request(new URL(path, base), init));
+  const post = (path, fields) => req(path, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(fields) });
+  try {
+    const metadata = await (await req("/.well-known/oauth-authorization-server")).json();
+    expect(metadata.code_challenge_methods_supported).toEqual(["S256"]);
+    expect(metadata.registration_endpoint).toBe(`${base}/oauth/register`);
+    expect((await req("/mcp")).headers.get("WWW-Authenticate")).toContain("oauth-protected-resource");
+    const redirect = "https://chatgpt.com/connector/oauth/test-callback";
+    const register = body => req("/oauth/register", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
+    expect((await register({ redirect_uris: ["https://evil.example/callback"] })).status).toBe(400);
+    const registration = await register({ redirect_uris: [redirect], token_endpoint_auth_method: "none" });
+    expect(registration.status).toBe(201);
+    const client = await registration.json();
+    expect(client.token_endpoint_auth_method).toBe("none");
+    const confidential = await (await register({ redirect_uris: [redirect], token_endpoint_auth_method: "client_secret_post" })).json();
+    expect(typeof confidential.client_secret).toBe("string");
+    expect((await post("/oauth/token", { grant_type: "test", client_id: confidential.client_id,
+      client_secret: "bad", resource: base })).status).toBe(401);
+    expect((await post("/oauth/token", { grant_type: "test", client_id: confidential.client_id,
+      client_secret: confidential.client_secret, resource: base })).status).toBe(400);
+    const basicClient = await (await register({ redirect_uris: [redirect] })).json();
+    expect(basicClient.token_endpoint_auth_method).toBe("client_secret_basic");
+    const basicHeader = `Basic ${Buffer.from(`${basicClient.client_id}:${basicClient.client_secret}`).toString("base64")}`;
+    expect((await req("/oauth/token", { method: "POST", headers: {
+      "Content-Type": "application/x-www-form-urlencoded", Authorization: basicHeader },
+      body: new URLSearchParams({ grant_type: "test", resource: base }) })).status).toBe(400);
+    const user = store.invite("alice", ["#soup"], "chonkbase");
+    const session = store.createSession(user.id);
+    const verifier = "v".repeat(43);
+    const challenge = createHash("sha256").update(verifier).digest("base64url");
+    const params = { response_type: "code", client_id: client.client_id, redirect_uri: redirect, state: "sample-state",
+      scope: "irc:read", code_challenge: challenge, code_challenge_method: "S256", resource: base };
+    expect((await req(`/oauth/authorize?${new URLSearchParams({ ...params, resource: "https://evil.example" })}`)).status).toBe(400);
+    expect((await req(`/oauth/authorize?${new URLSearchParams({ ...params, code_challenge: "" })}`)).status).toBe(400);
+    const begin = await req(`/oauth/authorize?${new URLSearchParams(params)}`);
+    const requestId = new URL(begin.headers.get("location")).searchParams.get("request_id");
+    const cookie = `__Host-zircon_session=${session}`;
+    const consent = await req(`/oauth/authorize?request_id=${requestId}`, { headers: { Cookie: cookie } });
+    const csrf = (await consent.text()).match(/name="csrf" value="([^"]+)"/)[1];
+    const approved = await req("/oauth/authorize/approve", { method: "POST", headers: {
+      "Content-Type": "application/x-www-form-urlencoded", Cookie: cookie, Origin: base },
+      body: new URLSearchParams({ request_id: requestId, csrf, decision: "approve" }) });
+    const code = new URL(approved.headers.get("location")).searchParams.get("code");
+    const exchange = { grant_type: "authorization_code", client_id: client.client_id, redirect_uri: redirect, code, code_verifier: verifier };
+    expect((await post("/oauth/token", { ...exchange, resource: "https://evil.example" })).status).toBe(400);
+    const tokenResponse = await post("/oauth/token", { ...exchange, resource: base });
+    expect(tokenResponse.status).toBe(200);
+    const tokens = await tokenResponse.json();
+    const mcp = (method, params, token = tokens.access_token) => req("/mcp", { method: "POST", headers: {
+      Authorization: `Bearer ${token}`, "Content-Type": "application/json", Accept: "application/json, text/event-stream" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) });
+    expect((await req("/v1/status", { headers: { Authorization: `Bearer ${tokens.access_token}` } })).status).toBe(401);
+    expect((await (await mcp("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } })).json()).result.serverInfo.name).toBe("zircon");
+    const listed = (await (await mcp("tools/list", {})).json()).result.tools;
+    expect(listed.map(tool => tool.name)).toEqual(["list_channels", "get_channel_messages"]);
+    expect(listed.every(tool => tool.outputSchema && tool.annotations.readOnlyHint)).toBe(true);
+    expect((await (await mcp("tools/call", { name: "list_channels", arguments: {} })).json()).result.structuredContent.channels).toEqual(["#soup"]);
+    expect((await (await mcp("tools/call", { name: "get_channel_messages", arguments: { channel: "#soup" } })).json()).result.structuredContent.messages[0].text).toBe("hello");
+    expect((await (await mcp("tools/call", { name: "get_channel_messages", arguments: { channel: "#other" } })).json()).error.code).toBe(-32602);
+    const refreshed = await post("/oauth/token", { grant_type: "refresh_token", client_id: client.client_id, refresh_token: tokens.refresh_token, resource: base });
+    expect(refreshed.status).toBe(200);
+    expect((await req("/mcp", { headers: { Authorization: `Bearer ${tokens.access_token}` } })).status).toBe(405);
+  } finally { store.close(); }
+});
+
 test("one ZNC account and network are provisioned per invited user", () => {
   const store = new Store(":memory:");
   try {

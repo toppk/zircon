@@ -54,8 +54,8 @@ in {
     assertions = [
       { assertion = cfg.environmentFile != null && !(lib.hasPrefix "/nix/store/" (toString cfg.environmentFile));
         message = "services.zircon.environmentFile must be an absolute path outside /nix/store"; }
-      { assertion = settings.githubClientId != "" && settings.oauthRedirectUris != [] && settings.ircChannels != [] && settings.ircNetworks != [];
-        message = "services.zircon.settings requires githubClientId, oauthRedirectUris, ircChannels, and ircNetworks"; }
+      { assertion = settings.githubClientId != "" && settings.ircChannels != [] && settings.ircNetworks != [];
+        message = "services.zircon.settings requires githubClientId, ircChannels, and ircNetworks"; }
     ];
 
     systemd.services.zircon = {

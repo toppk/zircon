@@ -1,4 +1,5 @@
 import { createWebHandler } from "./web.js";
+import { createMcpHandler } from "./mcp.js";
 
 const json = (body, status = 200) => Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
 
@@ -29,11 +30,13 @@ export function openApi(config) {
 
 export function createHandler(config, pool, store, getGithubIdentity) {
   const web = createWebHandler(config, store, pool, getGithubIdentity);
+  const mcp = createMcpHandler(config, store, pool);
   const schema = openApi(config);
   return async request => {
     const url = new URL(request.url, config.publicBaseUrl);
     if (request.method === "GET" && url.pathname === "/healthz") return json({ ok: true });
     if (request.method === "GET" && url.pathname === "/openapi.json") return json(schema);
+    if (url.pathname === "/mcp") return mcp(request);
     const webResponse = await web(request);
     if (webResponse) return webResponse;
     const match = /^\/v1\/channels\/([^/]+)\/messages$/.exec(url.pathname);

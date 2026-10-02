@@ -3,7 +3,7 @@ title: Overview
 hero: true
 hero-eyebrow: ChatGPT · IRC · ZNC
 hero-title: Bring ChatGPT into your IRC channels.
-hero-lede: Zircon is a small Bun service that lets invited people read and post to IRC from a Custom GPT. Each person signs in with GitHub, picks their own nick, and gets their own ZNC account, so their messages go out under their own name.
+hero-lede: Zircon is a small Bun service with an MCP connector for reading IRC in ChatGPT. Each invited person signs in with GitHub, picks their own nick, and gets their own ZNC account. Public onboarding and posting through MCP are planned.
 hero-image: assets/logo-512.webp
 hero-links:
   - label: How it works
@@ -12,7 +12,7 @@ hero-links:
   - label: Deploy it
     href: deploy.html
     kind: secondary
-description: Zircon connects a ChatGPT Custom GPT Action to IRC through one local ZNC process, with a separate ZNC account and network per invited GitHub user.
+description: Zircon connects ChatGPT to IRC through an MCP server and one local ZNC process, with a separate ZNC account per invited GitHub user.
 ---
 
 ## What Zircon does
@@ -31,11 +31,11 @@ each of them, so nobody posts as anyone else.
 ::: card
 [ChatGPT]{.label}
 
-### A Custom GPT Action
+### An MCP connector
 
-Zircon serves an OpenAPI schema and its own OAuth authorization server.
-The GPT reads recent channel messages and sends one-line posts, limited to
-the channels the owner granted.
+Zircon serves read tools and its own OAuth authorization server. ChatGPT
+can list enabled channels and read recent ZNC-buffered messages. Search,
+mentions and posting through MCP are planned before public launch.
 :::
 
 ::: card
@@ -53,14 +53,14 @@ restarts ZNC.
 
 ::: stack
 ::: tier
-[ChatGPT [Custom GPT Action]{.small}]{.box}
+[ChatGPT [MCP connector]{.small}]{.box}
 [Browser [GitHub sign-in · /settings]{.small}]{.box}
 :::
 
 [HTTPS via reverse proxy]{.wire}
 
 ::: tier
-[zircon [OAuth · API · settings · invites]{.small}]{.box .daemon}
+[zircon [MCP · OAuth · settings · invites]{.small}]{.box .daemon}
 :::
 
 ::: tier
@@ -79,8 +79,8 @@ restarts ZNC.
 
 ::: safety
 **Invite only, channel limited.** Nobody can sign in without an invitation
-from the owner, and the GPT can only read and post in channels the owner
-granted and the user turned on.
+from the owner, and the MCP tools can only read channels the owner granted
+and the user turned on.
 :::
 
 - **Tokens are hashed.** Zircon stores OAuth access and refresh tokens
@@ -99,7 +99,7 @@ granted and the user turned on.
 ::: card
 ### Using Zircon
 
-[Joining as a user](joining.html) walks through the invitation, the GPT
+[Joining as a user](joining.html) walks through the invitation, the connector
 sign-in and `/settings`.
 :::
 
@@ -114,6 +114,6 @@ admin invite call.
 ### Running it
 
 [Configuration](configuration.html) lists every setting, and
-[Deployment](deploy.html) covers ZNC, secrets, backups and the GPT Action.
+[Deployment](deploy.html) covers ZNC, secrets, backups and the MCP connector.
 :::
 :::

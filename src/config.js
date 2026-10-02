@@ -19,7 +19,7 @@ function httpsUrl(name) {
 
 export function loadConfig() {
   const publicBaseUrl = httpsUrl("PUBLIC_BASE_URL").replace(/\/$/, "");
-  const oauthRedirectUris = required("OAUTH_REDIRECT_URIS").split(",").map(s => s.trim());
+  const oauthRedirectUris = (process.env.OAUTH_REDIRECT_URIS ?? "").split(",").map(s => s.trim()).filter(Boolean);
   if (oauthRedirectUris.some(uri => {
     const url = new URL(uri);
     return url.protocol !== "https:" || !["chatgpt.com", "chat.openai.com"].includes(url.hostname) ||

@@ -6,13 +6,13 @@ Zircon is a Bun service that connects ChatGPT to IRC through one local ZNC proce
 
 Documentation: <https://toppk.github.io/zircon/> (sources in `site/`; `site/build.sh` builds it with pandoc into `_site/`).
 
-Zircon provides OAuth authorization code and refresh tokens for a Custom GPT Action. It stores users, settings, sessions, hashed tokens and post audit entries in SQLite under `/var/lib/zircon`. The API binds `127.0.0.1:3000`; HAProxy supplies public HTTPS at `https://zircon.chooser.us`. ZNC's IRC client listener remains on loopback `127.0.0.1:6667`, with no web admin or public client port.
+Zircon exposes a Streamable HTTP MCP connector at `/mcp` with read tools for channel lists and recent messages. ChatGPT connects with OAuth authorization code, required S256 PKCE, and dynamic client registration; people sign in with GitHub. The existing GPT Action API remains available for compatibility. Zircon stores users, settings, sessions, hashed tokens and post audit entries in SQLite under `/var/lib/zircon`. The API binds `127.0.0.1:3000`; HAProxy supplies public HTTPS at `https://zircon.chooser.us`. ZNC's IRC client listener remains on loopback `127.0.0.1:6667`, with no web admin or public client port.
 
-The [deployment handoff](DEPLOY.md) covers the required one-time ne2 ZNC migration to a mutable configuration and a dedicated administrator account, secrets, backup, GPT Action setup and a user walkthrough. Do not route public traffic to Zircon until that migration and a live end-to-end check are complete.
+The [deployment handoff](DEPLOY.md) covers the ne2 setup, MCP connector, secrets, backups and remaining public launch work.
 
 ## API
 
-`GET /openapi.json` serves the GPT Action schema. `/oauth/authorize`, `/oauth/token` and `/oauth/revoke` implement Zircon's OAuth flow. Users manage their network, nick, display name and enabled channels at `/settings`. OAuth bearer endpoints are `GET /v1/status`, `GET /v1/channels/{channel}/messages` and `POST /v1/channels/{channel}/messages` with JSON `{"text":"hello"}`. Omit `#` from the channel path. Zircon enforces the owner's channel grants and logs each accepted post. The [API reference](https://toppk.github.io/zircon/api.html) has the details.
+`POST /mcp` serves the MCP tools. OAuth discovery lives under `/.well-known/`, and `/oauth/register` accepts ChatGPT callback URLs for dynamic client registration. Users manage their network, nick, display name and enabled channels at `/settings`. The older REST endpoints remain available, with their own legacy OAuth tokens. The [API reference](https://toppk.github.io/zircon/api.html) has the details.
 
 The owner invites GitHub users with `POST /admin/invite`, `Authorization: Bearer <ADMIN_TOKEN>`, and JSON such as `{"github_login":"alice","channels":["#soup"]}`. Registration remains invite-only. The current server catalog starts with `irc.chonkbase.net:6697` over verified TLS; the owner can add approved networks in the NixOS module.
 

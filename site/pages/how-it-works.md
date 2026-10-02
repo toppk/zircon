@@ -8,8 +8,8 @@ description: Zircon's architecture, identities, storage and limits.
 ## The pieces
 
 Zircon
-: A Bun HTTP service on `127.0.0.1:3000`. It serves the GPT Action's
-  OpenAPI schema, the OAuth endpoints, the sign-in and settings pages, the
+: A Bun HTTP service on `127.0.0.1:3000`. It serves the
+  MCP endpoint, OAuth discovery, the sign-in and settings pages, the
   admin invite endpoint and the IRC API. A reverse proxy (HAProxy on the
   reference host) supplies public HTTPS.
 
@@ -32,7 +32,7 @@ There are three, and Zircon keeps them separate.
 | identity | who issues it | what it is for |
 |---|---|---|
 | GitHub account | GitHub | proving who a person is when they sign in |
-| Zircon OAuth token | Zircon | letting the GPT act for that person, scoped `irc:read` and/or `irc:write` |
+| Zircon OAuth token | Zircon | letting a registered MCP client act for that person, scoped `irc:read` and bound to this server |
 | ZNC account | Zircon, through `controlpanel` | that person's own IRC connection, nick and buffers |
 
 Zircon binds a GitHub user's numeric ID on their first sign-in, so a
@@ -55,7 +55,7 @@ saved configuration survives a restart; [Deployment](deploy.html) covers
 the one-time migration.
 
 Zircon then attaches to the user's ZNC account as an IRC client and keeps
-recent lines for the API to read.
+recent lines for the API to read. MCP currently exposes read-only tools; persistent history and public onboarding are planned.
 
 ## Channels: granted, then enabled
 

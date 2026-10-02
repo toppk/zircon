@@ -1,14 +1,26 @@
 ---
 title: API reference
 eyebrow: Use
-lede: Zircon's HTTP surface, covering the GPT Action schema, OAuth, the IRC endpoints and the owner's invite call.
-description: Zircon HTTP endpoints, OAuth flow, IRC API and admin invite.
+lede: Zircon's MCP connector, OAuth discovery and existing REST endpoints.
+description: Zircon MCP tools, OAuth discovery, IRC API and admin invite.
 ---
 
 ## Discovery
 
+`POST /mcp`
+: Streamable HTTP MCP endpoint. It responds to JSON-RPC initialization, `tools/list` and `tools/call` with JSON. An unauthenticated request returns an OAuth discovery challenge.
+
+`GET /.well-known/oauth-protected-resource`
+: Resource metadata for the MCP connector.
+
+`GET /.well-known/oauth-authorization-server`
+: Authorization server metadata, including PKCE S256 and registration.
+
+`POST /oauth/register`
+: Dynamic client registration for exact ChatGPT connector callback URIs. Supports public and confidential clients.
+
 `GET /openapi.json`
-: The OpenAPI 3.1 schema to import into the GPT Action builder.
+: Legacy GPT Action schema.
 
 `GET /healthz`
 : `{"ok": true}` when the service is up.
@@ -18,10 +30,7 @@ description: Zircon HTTP endpoints, OAuth flow, IRC API and admin invite.
 
 ## OAuth
 
-Zircon is the authorization server for the GPT Action. It supports the
-authorization code grant with an optional S256 PKCE challenge, and refresh
-tokens. The client is confidential: the token and revoke endpoints always
-require the client ID and secret, in the form body or with HTTP Basic.
+Zircon is the authorization server for the MCP connector. Registered MCP clients must use the authorization code grant with S256 PKCE and include `resource=https://zircon.chooser.us` in authorization and token requests. Access tokens are bound to that resource. Refresh tokens rotate on each use. The legacy GPT Action client remains confidential and accepts optional PKCE for compatibility.
 
 | endpoint | purpose |
 |---|---|
@@ -30,8 +39,16 @@ require the client ID and secret, in the form body or with HTTP Basic.
 | `POST /oauth/revoke` | revokes an access or refresh token |
 
 Scopes are `irc:read` and `irc:write`. Refresh tokens rotate on each use.
-Redirect URIs must exactly match one in `oauthRedirectUris`, and must be a
-ChatGPT GPT Action callback.
+Each dynamically registered redirect URI must exactly match one submitted at registration. The older GPT Action client uses the optional `oauthRedirectUris` list.
+
+## MCP tools
+
+| tool | scope | result |
+|---|---|---|
+| `list_channels` | `irc:read` | The user's chosen network and enabled channels |
+| `get_channel_messages` | `irc:read` | Up to 200 recent buffered messages from one enabled channel |
+
+Messages come from the current per-user ZNC replay buffer. Persistent history, search, mentions and posting through MCP are planned before public directory submission.
 
 ## IRC endpoints
 

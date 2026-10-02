@@ -16,7 +16,6 @@ services.zircon = {
   environmentFile = "/var/lib/zircon-secrets/zircon.env";
   settings = {
     githubClientId = "<GitHub OAuth app client ID>";
-    oauthRedirectUris = [ "https://chatgpt.com/aip/g-.../oauth/callback" ];
     ircChannels = [ "#soup" ];
   };
 };
@@ -29,8 +28,8 @@ services.zircon = {
 | `environmentFile` | none, required | secrets file outside `/nix/store` |
 | `settings.publicBaseUrl` | `https://zircon.chooser.us` | public HTTPS origin |
 | `settings.githubClientId` | required | GitHub OAuth app client ID |
-| `settings.oauthClientId` | `zircon-chatgpt` | client ID the GPT Action uses |
-| `settings.oauthRedirectUris` | required | exact GPT Action callback URLs |
+| `settings.oauthClientId` | `zircon-chatgpt` | legacy GPT Action client ID |
+| `settings.oauthRedirectUris` | `[]` | optional exact legacy GPT Action callback URLs |
 | `settings.zncPort` | `6667` | ZNC's loopback IRC listener |
 | `settings.zncAdminUser` | `zirconctl` | ZNC administrator with `controlpanel` |
 | `settings.ircNetworks` | `chonkbase`, `irc.chonkbase.net:6697`, TLS | owner-approved servers users may pick |
@@ -51,7 +50,7 @@ characters.
 | name | used for |
 |---|---|
 | `GITHUB_CLIENT_SECRET` | GitHub sign-in token exchange |
-| `OAUTH_CLIENT_SECRET` | the GPT Action's client secret |
+| `OAUTH_CLIENT_SECRET` | legacy GPT Action client secret; still required by current configuration |
 | `SESSION_SECRET` | CSRF tokens for the browser pages |
 | `ADMIN_TOKEN` | the owner's `POST /admin/invite` bearer token |
 | `ZNC_ADMIN_PASSWORD` | the ZNC administrator account |
@@ -65,7 +64,7 @@ openssl rand -base64 48   # one per secret
 
 Outside NixOS, Zircon reads the same settings from the environment:
 `PUBLIC_BASE_URL`, `GITHUB_CLIENT_ID`, `OAUTH_CLIENT_ID`,
-`OAUTH_REDIRECT_URIS` (comma separated), `IRC_CHANNELS` (comma separated),
+`OAUTH_REDIRECT_URIS` (optional, comma separated), `IRC_CHANNELS` (comma separated),
 `IRC_NETWORKS_JSON`, `ZNC_ADMIN_USER`, plus optional `PORT`, `MAX_USERS`,
 `STATE_DIR` (default `/var/lib/zircon`), `ZNC_HOST`, `ZNC_PORT`,
 `IRC_USERNAME` and `IRC_REALNAME`.

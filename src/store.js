@@ -50,7 +50,19 @@ export class Store {
         id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL, github_login TEXT NOT NULL,
         channel TEXT NOT NULL, text TEXT NOT NULL, created_at INTEGER NOT NULL
       );
+      CREATE TABLE IF NOT EXISTS oauth_clients (
+        id TEXT PRIMARY KEY, redirect_uris TEXT NOT NULL, created_at INTEGER NOT NULL,
+        auth_method TEXT NOT NULL DEFAULT 'none', secret_hash TEXT
+      );
     `);
+    for (const table of ["auth_requests", "auth_codes", "tokens"]) {
+      if (!this.db.query(`PRAGMA table_info(${table})`).all().some(column => column.name === "resource")) {
+        this.db.run(`ALTER TABLE ${table} ADD COLUMN resource TEXT`);
+      }
+    }
+    const clientColumns = this.db.query("PRAGMA table_info(oauth_clients)").all().map(column => column.name);
+    if (!clientColumns.includes("auth_method")) this.db.run("ALTER TABLE oauth_clients ADD COLUMN auth_method TEXT NOT NULL DEFAULT 'none'");
+    if (!clientColumns.includes("secret_hash")) this.db.run("ALTER TABLE oauth_clients ADD COLUMN secret_hash TEXT");
     this.db.run("DELETE FROM github_states WHERE expires_at < ?", [now()]);
     this.db.run("DELETE FROM sessions WHERE expires_at < ?", [now()]);
     this.db.run("DELETE FROM auth_requests WHERE expires_at < ?", [now()]);
@@ -150,10 +162,24 @@ export class Store {
 
   revokeSession(token) { if (token) this.db.query("DELETE FROM sessions WHERE hash = ?").run(tokenHash(token)); }
 
+  registerClient(redirectUris, authMethod) {
+    const id = randomToken();
+    const secret = authMethod === "none" ? null : randomToken();
+    this.db.query("INSERT INTO oauth_clients (id,redirect_uris,created_at,auth_method,secret_hash) VALUES (?,?,?,?,?)")
+      .run(id, JSON.stringify(redirectUris), now(), authMethod, secret ? tokenHash(secret) : null);
+    return { id, secret };
+  }
+
+  oauthClient(id) {
+    if (!id) return null;
+    const row = this.db.query("SELECT redirect_uris,auth_method,secret_hash FROM oauth_clients WHERE id = ?").get(id);
+    return row ? { redirectUris: JSON.parse(row.redirect_uris), authMethod: row.auth_method, secretHash: row.secret_hash } : null;
+  }
+
   createAuthRequest(details) {
     const id = randomToken();
-    this.db.query("INSERT INTO auth_requests VALUES (?,?,?,?,?,?,?)")
-      .run(id, details.clientId, details.redirectUri, details.state, details.scope, details.codeChallenge ?? null, now() + 10 * 60_000);
+    this.db.query("INSERT INTO auth_requests (id,client_id,redirect_uri,state,scope,code_challenge,expires_at,resource) VALUES (?,?,?,?,?,?,?,?)")
+      .run(id, details.clientId, details.redirectUri, details.state, details.scope, details.codeChallenge ?? null, now() + 10 * 60_000, details.resource ?? null);
     return id;
   }
 
@@ -162,8 +188,8 @@ export class Store {
 
   createAuthCode(userId, request) {
     const code = randomToken();
-    this.db.query("INSERT INTO auth_codes VALUES (?,?,?,?,?,?,?,0)")
-      .run(tokenHash(code), userId, request.client_id, request.redirect_uri, request.scope, request.code_challenge, now() + 5 * 60_000);
+    this.db.query("INSERT INTO auth_codes (hash,user_id,client_id,redirect_uri,scope,code_challenge,expires_at,used,resource) VALUES (?,?,?,?,?,?,?,0,?)")
+      .run(tokenHash(code), userId, request.client_id, request.redirect_uri, request.scope, request.code_challenge, now() + 5 * 60_000, request.resource);
     return code;
   }
 
@@ -180,25 +206,25 @@ export class Store {
     })();
   }
 
-  issueTokens(userId, clientId, scope) {
+  issueTokens(userId, clientId, scope, resource = null) {
     const accessToken = randomToken();
     const refreshToken = randomToken();
     this.db.transaction(() => {
-      this.db.query("INSERT INTO tokens VALUES (?,?,?,?,?,?,0)")
-        .run(tokenHash(accessToken), userId, "access", clientId, scope, now() + 3600_000);
-      this.db.query("INSERT INTO tokens VALUES (?,?,?,?,?,?,0)")
-        .run(tokenHash(refreshToken), userId, "refresh", clientId, scope, now() + 30 * 86_400_000);
+      this.db.query("INSERT INTO tokens (hash,user_id,kind,client_id,scope,expires_at,revoked,resource) VALUES (?,?,?,?,?,?,0,?)")
+        .run(tokenHash(accessToken), userId, "access", clientId, scope, now() + 3600_000, resource);
+      this.db.query("INSERT INTO tokens (hash,user_id,kind,client_id,scope,expires_at,revoked,resource) VALUES (?,?,?,?,?,?,0,?)")
+        .run(tokenHash(refreshToken), userId, "refresh", clientId, scope, now() + 30 * 86_400_000, resource);
     })();
     return { access_token: accessToken, token_type: "Bearer", expires_in: 3600, refresh_token: refreshToken, scope };
   }
 
-  rotateRefresh(token, clientId) {
+  rotateRefresh(token, clientId, resource = null) {
     return this.db.transaction(() => {
       const hash = tokenHash(token);
       const row = this.db.query("SELECT * FROM tokens WHERE hash = ? AND kind = 'refresh' AND revoked = 0 AND expires_at > ?").get(hash, now());
-      if (!row || row.client_id !== clientId || !this.userById(row.user_id)) return null;
+      if (!row || row.client_id !== clientId || row.resource !== resource || !this.userById(row.user_id)) return null;
       this.db.query("UPDATE tokens SET revoked = 1 WHERE hash = ?").run(hash);
-      return this.issueTokens(row.user_id, row.client_id, row.scope);
+      return this.issueTokens(row.user_id, row.client_id, row.scope, row.resource);
     })();
   }
 
@@ -206,11 +232,11 @@ export class Store {
     this.db.query("UPDATE tokens SET revoked = 1 WHERE hash = ? AND client_id = ?").run(tokenHash(token), clientId);
   }
 
-  accessUser(token, requiredScope) {
+  accessUser(token, requiredScope, resource = null) {
     if (!token) return null;
     const row = this.db.query("SELECT * FROM tokens WHERE hash = ? AND kind = 'access' AND revoked = 0 AND expires_at > ?")
       .get(tokenHash(token), now());
-    if (!row || !row.scope.split(" ").includes(requiredScope)) return null;
+    if (!row || row.resource !== resource || !row.scope.split(" ").includes(requiredScope)) return null;
     return this.userById(row.user_id);
   }
 

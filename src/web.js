@@ -1,6 +1,6 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
 import { githubIdentity } from "./github.js";
-import { randomToken } from "./store.js";
+import { randomToken, tokenHash } from "./store.js";
 
 const SESSION_COOKIE = "__Host-zircon_session";
 const GITHUB_COOKIE = "__Host-zircon_github_state";
@@ -48,7 +48,7 @@ function sameOrigin(request, baseUrl) {
 function oauthError(error, status = 400) {
   return json({ error }, status);
 }
-function authenticateClient(request, form, config) {
+function authenticateClient(request, form, config, store) {
   let id = form.get("client_id");
   let secret = form.get("client_secret");
   const header = request.headers.get("authorization") ?? "";
@@ -60,7 +60,25 @@ function authenticateClient(request, form, config) {
       secret = decodeURIComponent(pair.slice(colon + 1));
     } catch { return false; }
   }
-  return equal(id, config.oauthClientId) && equal(secret, config.oauthClientSecret);
+  if (id === config.oauthClientId && equal(secret, config.oauthClientSecret)) return { id, resource: null };
+  const registered = typeof id === "string" ? store.oauthClient(id) : null;
+  if (registered) {
+    const basic = header.startsWith("Basic ");
+    if (registered.authMethod === "none" && !secret && !header) return { id, resource: baseResource(config) };
+    if (registered.authMethod === "client_secret_post" && !header && typeof secret === "string" && equal(tokenHash(secret), registered.secretHash)) return { id, resource: baseResource(config) };
+    if (registered.authMethod === "client_secret_basic" && basic && typeof secret === "string" && equal(tokenHash(secret), registered.secretHash)) return { id, resource: baseResource(config) };
+  }
+  return null;
+}
+
+const baseResource = config => config.publicBaseUrl;
+function chatgptRedirect(uri) {
+  if (typeof uri !== "string") return false;
+  try {
+    const url = new URL(uri);
+    return url.origin === "https://chatgpt.com" && !url.search && !url.hash &&
+      (url.pathname === "/connector_platform_oauth_redirect" || /^\/connector\/oauth\/[A-Za-z0-9_-]+$/.test(url.pathname)) && url.href === uri;
+  } catch { return false; }
 }
 
 export function createWebHandler(config, store, pool, getGithubIdentity = githubIdentity) {
@@ -74,6 +92,34 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
   return async request => {
     const url = new URL(request.url, base);
     const path = url.pathname;
+
+    if (path === "/.well-known/oauth-protected-resource" && request.method === "GET") return json({
+      resource: base, authorization_servers: [base], scopes_supported: ["irc:read", "irc:write"],
+      resource_documentation: `${base}/`, resource_policy_uri: `${base}/privacy`,
+    });
+    if (path === "/.well-known/oauth-authorization-server" && request.method === "GET") return json({
+      issuer: base, authorization_endpoint: `${base}/oauth/authorize`, token_endpoint: `${base}/oauth/token`,
+      registration_endpoint: `${base}/oauth/register`, revocation_endpoint: `${base}/oauth/revoke`,
+      response_types_supported: ["code"], grant_types_supported: ["authorization_code", "refresh_token"],
+      token_endpoint_auth_methods_supported: ["none", "client_secret_post", "client_secret_basic"],
+      code_challenge_methods_supported: ["S256"], scopes_supported: ["irc:read", "irc:write"],
+    });
+    if (path === "/oauth/register" && request.method === "POST") {
+      if (!store.allowRate("oauth-register", 30, 3600_000)) return oauthError("slow_down", 429);
+      let client;
+      try { client = await request.json(); } catch { return oauthError("invalid_client_metadata"); }
+      const uris = client?.redirect_uris;
+      if (!Array.isArray(uris) || !uris.length || uris.length > 4 || !uris.every(chatgptRedirect) ||
+          (client.token_endpoint_auth_method && !["none", "client_secret_post", "client_secret_basic"].includes(client.token_endpoint_auth_method)) ||
+          (client.grant_types && (!Array.isArray(client.grant_types) || client.grant_types.some(grant => !["authorization_code", "refresh_token"].includes(grant))))) {
+        return oauthError("invalid_client_metadata");
+      }
+      const authMethod = client.token_endpoint_auth_method ?? "client_secret_basic";
+      const registered = store.registerClient([...new Set(uris)], authMethod);
+      return json({ client_id: registered.id, ...(registered.secret ? { client_secret: registered.secret, client_secret_expires_at: 0 } : {}),
+        redirect_uris: uris, token_endpoint_auth_method: authMethod,
+        grant_types: ["authorization_code", "refresh_token"], response_types: ["code"] }, 201);
+    }
 
     if (path === "/privacy" && request.method === "GET") return page("Zircon privacy", `<p>Zircon uses GitHub to identify invited users. It stores your GitHub username and numeric ID, IRC settings, browser sessions, hashed OAuth tokens, and an audit of messages you send. It does not store your GitHub access token after sign-in.</p>
       <p>Your IRC nickname, channels, and messages are visible to people on the IRC networks you use. ChatGPT sends your Action requests to Zircon. The database is included in host backups. Contact the Zircon owner to request account removal.</p>`);
@@ -92,12 +138,15 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
         const codeChallenge = query.get("code_challenge");
         const method = query.get("code_challenge_method");
         const scopes = scope.split(" ").filter(Boolean);
-        if (query.get("response_type") !== "code" || clientId !== config.oauthClientId ||
-            !config.oauthRedirectUris.includes(redirectUri) || !state || state.length > 512 ||
+        const registered = store.oauthClient(clientId);
+        const resource = query.get("resource");
+        if (query.get("response_type") !== "code" ||
+            !(registered ? registered.redirectUris.includes(redirectUri) && resource === base : clientId === config.oauthClientId && config.oauthRedirectUris.includes(redirectUri) && !resource) ||
+            !state || state.length > 512 ||
             !scopes.length || scopes.some(item => !allowedScopes.has(item)) ||
             (codeChallenge && (!/^[A-Za-z0-9_-]{43,128}$/.test(codeChallenge) || method !== "S256")) ||
-            (!codeChallenge && method)) return oauthError("invalid_request");
-        const id = store.createAuthRequest({ clientId, redirectUri, state, scope: [...new Set(scopes)].join(" "), codeChallenge });
+            (!codeChallenge && method) || (registered && !codeChallenge)) return oauthError("invalid_request");
+        const id = store.createAuthRequest({ clientId, redirectUri, state, scope: [...new Set(scopes)].join(" "), codeChallenge, resource });
         return redirect(`${base}/oauth/authorize?request_id=${encodeURIComponent(id)}`);
       }
       if (!auth) return page("Authorization expired", "<p>Please start connecting Zircon from ChatGPT again.</p>");
@@ -131,20 +180,23 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
     if (path === "/oauth/token" && request.method === "POST") {
       if (!store.allowRate("oauth-token", 120, 60_000)) return oauthError("slow_down", 429);
       const form = await request.formData();
-      if (!authenticateClient(request, form, config)) return oauthError("invalid_client", 401);
+      const client = authenticateClient(request, form, config, store);
+      if (!client) return oauthError("invalid_client", 401);
+      const resource = form.get("resource") ?? null;
+      if (resource !== client.resource) return oauthError("invalid_target");
       const grant = form.get("grant_type");
       if (grant === "authorization_code") {
         const code = form.get("code");
         const redirectUri = form.get("redirect_uri");
         const verifier = form.get("code_verifier");
         const row = typeof code === "string" && typeof redirectUri === "string"
-          ? store.consumeAuthCode(code, config.oauthClientId, redirectUri, verifier) : null;
-        if (!row) return oauthError("invalid_grant");
-        return json(store.issueTokens(row.user_id, row.client_id, row.scope));
+          ? store.consumeAuthCode(code, client.id, redirectUri, verifier) : null;
+        if (!row || row.resource !== resource) return oauthError("invalid_grant");
+        return json(store.issueTokens(row.user_id, row.client_id, row.scope, resource));
       }
       if (grant === "refresh_token") {
         const token = form.get("refresh_token");
-        const result = typeof token === "string" ? store.rotateRefresh(token, config.oauthClientId) : null;
+        const result = typeof token === "string" ? store.rotateRefresh(token, client.id, resource) : null;
         return result ? json(result) : oauthError("invalid_grant");
       }
       return oauthError("unsupported_grant_type");
@@ -153,9 +205,10 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
     if (path === "/oauth/revoke" && request.method === "POST") {
       if (!store.allowRate("oauth-revoke", 120, 60_000)) return oauthError("slow_down", 429);
       const form = await request.formData();
-      if (!authenticateClient(request, form, config)) return oauthError("invalid_client", 401);
+      const client = authenticateClient(request, form, config, store);
+      if (!client) return oauthError("invalid_client", 401);
       const token = form.get("token");
-      if (typeof token === "string") store.revokeToken(token, config.oauthClientId);
+      if (typeof token === "string") store.revokeToken(token, client.id);
       return new Response(null, { status: 200, headers: { "Cache-Control": "no-store" } });
     }
 
