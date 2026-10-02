@@ -281,7 +281,7 @@ test("MCP discovery, OAuth, history, posting and presence tools", async () => {
     expect(status.upstreamConnected).toBeNull();
     expect(status.lastReceived.entryId).toBe(echoed.entryId);
     expect(status.channels[0].lastAcknowledged.entryId).toBe(unread.entries.at(-1).entryId);
-    expect(status.version).toBe("0.7.1");
+    expect(status.version).toBe("0.7.2");
     const lastHour = (await (await mcp("tools/call", { name: "read_history", arguments: { channel: "#soup", mode: "last_hour" } })).json()).result.structuredContent;
     expect(lastHour.entries.some(item => item.entryId === echoed.entryId)).toBe(true);
     expect((await (await mcp("tools/call", { name: "send_message", arguments: outgoing })).json()).result.structuredContent.status).toBe("echoed");
@@ -618,6 +618,36 @@ test("event worker retries transient failures with one ID and drops a gone subsc
     store.revokeToken(authorization.access_token, "agent-a");
     store.revokeToken(authorization.refresh_token, "agent-a");
     expect(store.hasEventAccess(user.id, "agent-a")).toBe(false);
+  } finally { store.close(); }
+});
+
+test("a new mention wakes delivery without waiting for the poll timer", async () => {
+  const store = new Store(":memory:", { ...config, diagnosticsEnabled: true });
+  try {
+    const user = inviteWithChannels(store, "alice");
+    const secret = `whsec_${randomBytes(32).toString("base64")}`;
+    store.saveEventSubscription(user, "agent-a", "message.mention", { channel: "#soup" },
+      "https://hooks.example.com/callback", secret, null);
+    store.issueTokens(user.id, "agent-a", "irc:read", base);
+    const sent = [];
+    const service = new EventService(store, async (_url, request) => {
+      sent.push(request);
+      return { status: 200, body: "" };
+    });
+    store.onEventQueued = () => service.wake();
+    const time = new Date().toISOString();
+    store.recordActivity(user, { channel: "#soup", kind: "message", time, observedAt: time,
+      timestampSource: "server", nick: "bob", text: "alice: hello" });
+    expect(store.db.query("SELECT count(*) AS count FROM event_deliveries").get().count).toBe(1);
+    await new Promise(resolve => setTimeout(resolve, 0));
+    expect(sent).toHaveLength(1);
+    expect(store.db.query("SELECT count(*) AS count FROM event_deliveries").get().count).toBe(0);
+    const activity = store.adminEvents(null, 10);
+    const queued = activity.find(item => item.action === "queued");
+    const started = activity.find(item => item.action === "delivery_started");
+    const delivered = activity.find(item => item.action === "delivery");
+    expect(started.result).toBe(queued.result);
+    expect(delivered.result).toBe(`200:${queued.result}`);
   } finally { store.close(); }
 });
 

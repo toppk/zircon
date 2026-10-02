@@ -18,6 +18,7 @@ const pruneTimer = setInterval(() => {
 const provisioner = new ZncProvisioner(config, store);
 const pool = new IrcPool(config, store, provisioner);
 const eventService = new EventService(store);
+store.onEventQueued = () => eventService.wake();
 const eventTimer = setInterval(() => {
   void eventService.drain().catch(error => console.error("Event worker failed:", error.message));
 }, 5000);

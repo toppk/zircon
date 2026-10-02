@@ -89,7 +89,21 @@ export class EventService {
     this.store = store;
     this.transport = transport;
     this.running = false;
+    this.wakePending = false;
+    this.wakeScheduled = false;
     this.verified = new Map();
+  }
+
+  wake() {
+    this.wakePending = true;
+    if (this.running || this.wakeScheduled) return;
+    this.wakeScheduled = true;
+    queueMicrotask(() => {
+      this.wakeScheduled = false;
+      if (this.running) return;
+      this.wakePending = false;
+      void this.drain().catch(error => console.error("Event worker failed:", error.message));
+    });
   }
 
   async post(url, secret, subscriptionId, id, data, previousSecret = null) {
@@ -135,6 +149,7 @@ export class EventService {
       return true;
     }
     try {
+      this.store.recordDiagnostic(user, "event", "delivery_started", delivery.event_id);
       const result = await this.post(delivery.url, delivery.secret, delivery.subscription_id, delivery.event_id, payload,
         delivery.rotate_until > Date.now() ? delivery.previous_secret : null);
       this.store.recordEventAttempt(delivery.subscription_id, String(result.status));
@@ -143,11 +158,11 @@ export class EventService {
         this.store.db.query("DELETE FROM event_subscriptions WHERE id=?").run(delivery.subscription_id);
       } else this.store.finishEventDelivery(delivery.event_id,
         result.status === 429 || result.status >= 500 ? "retry" : "done");
-      this.store.recordDiagnostic(user, "event", "delivery", String(result.status));
+      this.store.recordDiagnostic(user, "event", "delivery", `${result.status}:${delivery.event_id}`);
     } catch (error) {
       this.store.recordEventAttempt(delivery.subscription_id, "error");
       this.store.finishEventDelivery(delivery.event_id, "retry");
-      this.store.recordDiagnostic(user, "event", "delivery_error", String(error.message).slice(0, 64));
+      this.store.recordDiagnostic(user, "event", "delivery_error", `${delivery.event_id}:${String(error.message)}`.slice(0, 128));
     }
     return true;
   }
@@ -156,6 +171,12 @@ export class EventService {
     if (this.running) return;
     this.running = true;
     try { for (let index = 0; index < max && await this.processOnce(); index++); }
-    finally { this.running = false; }
+    finally {
+      this.running = false;
+      if (this.wakePending) {
+        this.wakePending = false;
+        this.wake();
+      }
+    }
   }
 }

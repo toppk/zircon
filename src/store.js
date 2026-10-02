@@ -31,6 +31,7 @@ export class Store {
     this.historyRetentionDays = historyRetentionDays;
     this.historyMaxPerChannel = historyMaxPerChannel;
     this.diagnosticsEnabled = diagnosticsEnabled;
+    this.onEventQueued = null;
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new Database(path, { create: true });
     this.db.run("PRAGMA journal_mode = WAL");
@@ -655,6 +656,7 @@ export class Store {
       this.db.query(`INSERT INTO event_deliveries(event_id,subscription_id,payload,next_attempt_at,created_at)
         VALUES (?,?,?,?,?)`).run(eventId, subscription.id, payload, now(), now());
       this.recordDiagnostic(user, "event", "queued", eventId);
+      this.onEventQueued?.();
     }
   }
 
