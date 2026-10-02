@@ -1,10 +1,13 @@
 import { createHash, createHmac, timingSafeEqual } from "node:crypto";
+import { readFileSync } from "node:fs";
 import { githubIdentity } from "./github.js";
 import { randomToken, tokenHash } from "./store.js";
 
 const SESSION_COOKIE = "__Host-zircon_session";
 const GITHUB_COOKIE = "__Host-zircon_github_state";
 const allowedScopes = new Set(["irc:read", "irc:write"]);
+const logo = readFileSync(new URL("./assets/logo.png", import.meta.url));
+const stylesheet = readFileSync(new URL("./assets/ui.css", import.meta.url));
 
 function json(body, status = 200) {
   return Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
@@ -19,10 +22,10 @@ function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 }
 function page(title, body, formOrigins = []) {
-  return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><title>${escapeHtml(title)}</title><main><h1>${escapeHtml(title)}</h1>${body}</main></html>`, {
+  return new Response(`<!doctype html><html lang="en"><head><meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1"><title>${escapeHtml(title)}</title><link rel="icon" href="/logo.png" type="image/png"><link rel="stylesheet" href="/ui.css"></head><body><main><div class="brand"><img src="/logo.png" width="42" height="42" alt="">Zircon IRC</div><h1>${escapeHtml(title)}</h1>${body}</main></body></html>`, {
     headers: {
       "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
-      "Content-Security-Policy": `default-src 'none'; form-action 'self' ${formOrigins.join(" ")}; frame-ancestors 'none'; base-uri 'none'`,
+      "Content-Security-Policy": `default-src 'none'; style-src 'self'; img-src 'self'; form-action 'self'${formOrigins.length ? ` ${formOrigins.join(" ")}` : ""}; frame-ancestors 'none'; base-uri 'none'`,
       "X-Content-Type-Options": "nosniff", "Referrer-Policy": "same-origin",
     },
   });
@@ -94,6 +97,13 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
     const url = new URL(request.url, base);
     const path = url.pathname;
 
+    if (path === "/logo.png" && request.method === "GET") return new Response(logo, {
+      headers: { "Content-Type": "image/png", "Cache-Control": "public, max-age=3600", "X-Content-Type-Options": "nosniff" },
+    });
+    if (path === "/ui.css" && request.method === "GET") return new Response(stylesheet, {
+      headers: { "Content-Type": "text/css; charset=utf-8", "Cache-Control": "public, max-age=3600", "X-Content-Type-Options": "nosniff" },
+    });
+
     if (path === "/.well-known/oauth-protected-resource" && request.method === "GET") return json({
       resource: base, authorization_servers: [base], scopes_supported: ["irc:read", "irc:write"],
       resource_documentation: "https://toppk.github.io/zircon/api.html", resource_policy_uri: `${base}/privacy`,
@@ -155,12 +165,20 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
       const user = sessionUser(request);
       if (!user) return redirect(`${base}/login?request_id=${encodeURIComponent(requestId)}`);
       const token = cookieValue(request);
-      return page("Connect Zircon to ChatGPT", `<p>Signed in as ${escapeHtml(user.github_login)}. ChatGPT requests ${escapeHtml(auth.scope)} access to your allowed IRC channels.</p>
+      const scopeDetails = {
+        "irc:read": ["Read your IRC channels", "View channel activity, history, search results and mentions."],
+        "irc:write": ["Send messages and change IRC presence", "Post to enabled channels and connect or disconnect your IRC network."],
+      };
+      const scopes = auth.scope.split(" ").map(scope => {
+        const [heading, detail] = scopeDetails[scope];
+        return `<li><strong>${heading}</strong><span>${detail}</span></li>`;
+      }).join("");
+      return page("Connect Zircon to ChatGPT", `<p class="signed-in">Signed in as <strong>${escapeHtml(user.github_login)}</strong></p><p>ChatGPT is requesting permission to:</p><ul class="scope-list">${scopes}</ul>
         <form method="post" action="/oauth/authorize/approve">
           <input type="hidden" name="request_id" value="${escapeHtml(requestId)}">
           <input type="hidden" name="csrf" value="${csrf(config, token)}">
-          <button name="decision" value="approve">Allow</button>
-          <button name="decision" value="deny">Deny</button>
+          <div class="consent-actions"><button class="button-primary" name="decision" value="approve">Allow access</button>
+          <button name="decision" value="deny">Deny</button></div>
         </form>`, [new URL(auth.redirect_uri).origin]);
     }
 

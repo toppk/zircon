@@ -23,6 +23,8 @@ test("requests without a Host header use the configured public URL", async () =>
   const request = path => ({ url: path, method: "GET", headers: new Headers() });
   expect((await handle(request("/healthz"))).status).toBe(200);
   expect((await handle(request("/privacy"))).status).toBe(200);
+  expect((await handle(request("/logo.png"))).headers.get("Content-Type")).toBe("image/png");
+  expect((await handle(request("/ui.css"))).headers.get("Content-Type")).toContain("text/css");
 });
 
 test("IRC parser and stream handle replay and split UTF-8", () => {
@@ -83,7 +85,13 @@ test("GitHub invite, consent, PKCE, API, refresh and revocation", async () => {
     const consent = await req(`/oauth/authorize?request_id=${requestId}`, { headers: { Cookie: cookie } });
     expect(consent.headers.get("Referrer-Policy")).toBe("same-origin");
     expect(consent.headers.get("Content-Security-Policy")).toContain("form-action 'self' https://chatgpt.com");
-    const csrf = (await consent.text()).match(/name="csrf" value="([^"]+)"/)[1];
+    expect(consent.headers.get("Content-Security-Policy")).toContain("style-src 'self'; img-src 'self'");
+    const consentHtml = await consent.text();
+    expect(consentHtml).toContain('class="brand"');
+    expect(consentHtml).toContain('class="consent-actions"');
+    expect(consentHtml).toContain("Read your IRC channels");
+    expect(consentHtml).toContain("Send messages and change IRC presence");
+    const csrf = consentHtml.match(/name="csrf" value="([^"]+)"/)[1];
     const settings = { display_name: "Alice", network_name: "chonkbase", nick: "Alice", channel: "#soup" };
     const settingsPage = await req("/settings", { headers: { Cookie: cookie } });
     expect(settingsPage.headers.get("Referrer-Policy")).toBe("same-origin");
