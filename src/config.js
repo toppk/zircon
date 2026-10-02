@@ -42,6 +42,14 @@ export function loadConfig() {
   const maxUsers = Number(process.env.MAX_USERS ?? "16");
   const historyRetentionDays = Number(process.env.HISTORY_RETENTION_DAYS ?? "7");
   const historyMaxPerChannel = Number(process.env.HISTORY_MAX_PER_CHANNEL ?? "5000");
+  const diagnosticsEnabled = process.env.DIAGNOSTICS_ENABLED === "true";
+  if (process.env.DIAGNOSTICS_ENABLED && !["true", "false"].includes(process.env.DIAGNOSTICS_ENABLED)) {
+    throw new Error("DIAGNOSTICS_ENABLED must be true or false");
+  }
+  const diagnosticsAdminLogins = (process.env.DIAGNOSTICS_ADMIN_LOGINS ?? "").split(",").map(login => login.trim().toLowerCase()).filter(Boolean);
+  if (diagnosticsAdminLogins.some(login => !/^[a-z0-9-]{1,39}$/.test(login))) {
+    throw new Error("DIAGNOSTICS_ADMIN_LOGINS must contain GitHub login names");
+  }
   if (![zncPort, port].every(n => Number.isInteger(n) && n > 0 && n <= 65535)) {
     throw new Error("ZNC_PORT and PORT must be valid TCP ports");
   }
@@ -85,5 +93,7 @@ export function loadConfig() {
     maxUsers,
     historyRetentionDays,
     historyMaxPerChannel,
+    diagnosticsEnabled,
+    diagnosticsAdminLogins,
   };
 }

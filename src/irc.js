@@ -92,6 +92,7 @@ export class IrcClient {
       this.socket = undefined;
       this.connected = false;
       this.joined.clear();
+      this.config.onState?.("znc_disconnected");
       if (!this.stopping) {
         const delay = this.reconnectDelay + Math.random() * this.reconnectDelay / 4;
         this.reconnectTimer = setTimeout(() => this.connect(), delay);
@@ -102,6 +103,7 @@ export class IrcClient {
 
   onConnect() {
     console.info(`Connected to local ZNC on ${this.config.zncHost}:${this.config.zncPort}`);
+    this.config.onState?.("znc_socket_connected");
     this.write("CAP LS 302");
     this.write(`PASS ${this.config.zncUser}/${this.config.zncNetwork}:${this.config.zncPassword}`);
     this.write(`NICK ${this.config.ircNick}`);
@@ -154,6 +156,7 @@ export class IrcClient {
     } else if (command === "001") {
       this.reconnectDelay = 1000;
       this.connected = true;
+      this.config.onState?.("znc_authenticated");
       for (const channel of this.config.ircChannels) this.write(`JOIN ${channel}`);
     } else if (command === "JOIN" && prefix && params.length) {
       if (prefix.split("!", 1)[0]?.toLowerCase() === this.config.ircNick.toLowerCase()) {

@@ -20,6 +20,7 @@ in {
     maxUsers = mkOption { type = types.ints.between 1 100; default = 16; description = "Maximum enabled ZNC user accounts created through Zircon."; };
     historyRetentionDays = mkOption { type = types.ints.between 1 365; default = 7; description = "Days to retain channel activity in SQLite."; };
     historyMaxPerChannel = mkOption { type = types.ints.between 100 100000; default = 5000; description = "Maximum retained activities per user and channel."; };
+    enableDiagnostics = mkOption { type = types.bool; default = false; description = "Enable the authenticated /admin/events diagnostic API and bounded MCP request logging."; };
     environmentFile = mkOption {
       type = types.nullOr types.path;
       default = null;
@@ -48,6 +49,7 @@ in {
         ircUsername = mkOption { type = types.str; default = "zircon"; };
         ircRealname = mkOption { type = types.str; default = "Zircon ChatGPT bridge"; };
         ircChannels = mkOption { type = types.listOf types.str; default = []; };
+        diagnosticsAdminLogins = mkOption { type = types.listOf types.str; default = []; description = "GitHub logins permitted to view diagnostics with a signed-in browser session."; };
       }; };
     };
   };
@@ -70,6 +72,8 @@ in {
         MAX_USERS = toString cfg.maxUsers;
         HISTORY_RETENTION_DAYS = toString cfg.historyRetentionDays;
         HISTORY_MAX_PER_CHANNEL = toString cfg.historyMaxPerChannel;
+        DIAGNOSTICS_ENABLED = lib.boolToString cfg.enableDiagnostics;
+        DIAGNOSTICS_ADMIN_LOGINS = lib.concatStringsSep "," settings.diagnosticsAdminLogins;
         PUBLIC_BASE_URL = settings.publicBaseUrl;
         GITHUB_CLIENT_ID = settings.githubClientId;
         OAUTH_CLIENT_ID = settings.oauthClientId;

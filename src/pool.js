@@ -26,7 +26,8 @@ export class IrcPool {
     const client = new IrcClient({ ...this.config, zncUser: user.znc_username, zncNetwork: "primary",
       zncPassword: userPassword(this.config, user), ircNick: user.nick,
       networkName: user.network_name, ircChannels: JSON.parse(user.selected_channels),
-      onActivity: event => this.store.recordActivity(user, event) });
+      onActivity: event => this.store.recordActivity(user, event),
+      onState: state => this.store.recordDiagnostic(user, "irc", state) });
     this.clients.set(user.id, client);
     client.start();
     return client;
@@ -54,6 +55,7 @@ export class IrcPool {
       { target: "*status", command: "SaveConfig", okay: /^Wrote config to / },
     ]);
     this.store.setOnline(user.id, online);
+    this.store.recordDiagnostic(user, "irc", online ? "go_online" : "go_offline", "ok");
     if (online) await this.forUser(this.store.userById(user.id));
   }
 

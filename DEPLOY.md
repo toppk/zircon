@@ -24,7 +24,7 @@ outbound_network:
   - 127.0.0.1:6667 (ZNC administration and per-user IRC clients)
   - irc.chonkbase.net:6697 (ZNC upstream over verified TLS)
 memory_estimate: Bun observed around 55 MB resident on ne2 before active user load; reserve 128 MB for Bun, and measure ZNC and Bun per active user before raising the 16-user cap
-scheduled_jobs: none
+scheduled_jobs: in-process hourly retention pruning and daily SQLite backup copy
 public_irc_client_port: no
 znc_web_admin_public: no
 ```
@@ -51,10 +51,12 @@ Example:
 services.zircon = {
   enable = true;
   environmentFile = "/var/lib/zircon-secrets/zircon.env";
+  enableDiagnostics = true; # optional, owner-only /admin/events
   settings = {
     githubClientId = "<GitHub OAuth app client ID>";
     zncAdminUser = "zirconctl";
     ircChannels = [ "#soup" ];
+    diagnosticsAdminLogins = [ "toppk" ];
   };
 };
 ```
@@ -65,7 +67,9 @@ Configure a custom MCP connection in ChatGPT developer mode with server URL `htt
 
 The authorization server does **not** advertise RFC 9207 issuer identification, so ChatGPT should use a callback-ID-specific redirect URI as described in [OpenAI's MCP authentication guide](https://developers.openai.com/plugins/build/auth). If ChatGPT shows a different callback, inspect it before changing the server's allowlist. The legacy GPT Action endpoints and optional callback list remain for compatibility; they do not determine MCP redirects.
 
-The consent and settings pages load `/ui.css` and `/logo.png` from Zircon. The app CSP permits these same-origin assets and the registered ChatGPT redirect origin on the consent page. Remove ne2's temporary HAProxy CSP and Referrer-Policy header overrides when deploying this version; otherwise the proxy CSP can block the new styling and logo. Verify consent approval and settings form submission after removing the overrides.
+The consent and settings pages load `/ui.css` and `/logo.png` from Zircon. The app owns its security headers, including the CSP that permits these same-origin assets and the registered ChatGPT redirect origin on the consent page. HAProxy supplies HSTS and `X-Forwarded-*` headers. ChatGPT may call either `/mcp` or `/mcp/`; both use the same handler. OAuth protected-resource discovery also responds at `/.well-known/oauth-protected-resource/mcp`.
+
+When `enableDiagnostics = true`, `GET /admin/events` returns recent IRC activity and metadata for MCP calls and IRC connection changes. It accepts `limit` (1–200) and optional ISO 8601 `since`. The owner can use a signed-in browser session if their GitHub login is in `diagnosticsAdminLogins`; automation can use `Authorization: Bearer <ADMIN_TOKEN>`. Keep that token out of chat and logs. Diagnostics store no OAuth tokens or tool arguments, are capped at 2000 records, and are pruned with the configured history retention. Channel text is returned from the existing per-user history store. Leave diagnostics disabled on deployments that do not need this view.
 
 The read tools return JSON directly, so this version does not need a long-lived stream, though HAProxy's 25-second timeout should be raised before any future streaming response. Automated tests cover registration, consent, PKCE, resource-bound tokens, history, posting and presence. The connector's initial read tools have been tested in ChatGPT developer mode; new write and history tools still need an owner test after deployment.
 

@@ -88,7 +88,7 @@ export function createMcpHandler(config, store, pool) {
     if (call.id === undefined) return new Response(null, { status: 202 });
     if (call.method === "initialize") return result(call.id, {
       protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: false } },
-      serverInfo: { name: "zircon-irc", title: "Zircon IRC", version: "0.4.0" },
+      serverInfo: { name: "zircon-irc", title: "Zircon IRC", version: "0.4.1" },
       instructions: "Use list_channels to see enabled channels and online status. Retained messages include IRC activity and timestamps. Staying online records new activity; going offline stops collection and future events. Sending an IRC message is public and irreversible, so confirm its destination and exact text with the user.",
     });
     if (call.method === "ping") return result(call.id, {});

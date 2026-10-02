@@ -145,10 +145,12 @@ test("MCP discovery, OAuth, history, posting and presence tools", async () => {
   try {
     const metadata = await (await req("/.well-known/oauth-authorization-server")).json();
     const resourceMetadata = await (await req("/.well-known/oauth-protected-resource")).json();
+    expect(await (await req("/.well-known/oauth-protected-resource/mcp")).json()).toEqual(resourceMetadata);
     expect(resourceMetadata.resource_documentation).toBe("https://toppk.github.io/zircon/api.html");
     expect(metadata.code_challenge_methods_supported).toEqual(["S256"]);
     expect(metadata.registration_endpoint).toBe(`${base}/oauth/register`);
     expect((await req("/mcp")).headers.get("WWW-Authenticate")).toContain("oauth-protected-resource");
+    expect((await req("/mcp/")).headers.get("WWW-Authenticate")).toContain("oauth-protected-resource");
     const redirect = "https://chatgpt.com/connector/oauth/test-callback";
     const register = body => req("/oauth/register", { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) });
     expect((await register({ redirect_uris: ["https://evil.example/callback"] })).status).toBe(400);
@@ -202,6 +204,10 @@ test("MCP discovery, OAuth, history, posting and presence tools", async () => {
     expect((await req("/v1/status", { headers: { Authorization: `Bearer ${tokens.access_token}` } })).status).toBe(401);
     expect((await (await mcp("initialize", { protocolVersion: "2025-06-18", capabilities: {}, clientInfo: { name: "test", version: "1" } })).json()).result.serverInfo.title).toBe("Zircon IRC");
     const listed = (await (await mcp("tools/list", {})).json()).result.tools;
+    const slashList = await req("/mcp/", { method: "POST", headers: {
+      Authorization: `Bearer ${tokens.access_token}`, "Content-Type": "application/json" },
+      body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }) });
+    expect((await slashList.json()).result.tools.map(tool => tool.name)).toEqual(listed.map(tool => tool.name));
     expect(listed.map(tool => tool.name)).toEqual(["list_channels", "get_channel_messages", "search_messages", "get_mentions", "send_message", "go_offline", "go_online"]);
     expect(listed.every(tool => tool.outputSchema && ["readOnlyHint", "destructiveHint", "openWorldHint"].every(key => typeof tool.annotations?.[key] === "boolean"))).toBe(true);
     expect(listed.find(tool => tool.name === "send_message").annotations.destructiveHint).toBe(true);
@@ -233,6 +239,39 @@ test("MCP discovery, OAuth, history, posting and presence tools", async () => {
     const refreshed = await post("/oauth/token", { grant_type: "refresh_token", client_id: client.client_id, refresh_token: tokens.refresh_token, resource: base });
     expect(refreshed.status).toBe(200);
     expect((await req("/mcp", { headers: { Authorization: `Bearer ${tokens.access_token}` } })).status).toBe(405);
+  } finally { store.close(); }
+});
+
+test("owner diagnostics show bounded IRC activity and MCP calls without exposing tokens", async () => {
+  const diagnosticConfig = { ...config, diagnosticsEnabled: true, diagnosticsAdminLogins: ["alice"] };
+  const store = new Store(":memory:", diagnosticConfig);
+  try {
+    const alice = store.invite("alice", ["#soup"], "chonkbase");
+    const bob = store.invite("bob", ["#soup"], "chonkbase");
+    const time = new Date().toISOString();
+    store.recordActivity(alice, { channel: "#soup", kind: "message", time, observedAt: time,
+      timestampSource: "server", nick: "chickenbot", text: "a soup joke" });
+    const handle = createHandler(diagnosticConfig, {}, store, async () => null);
+    const req = (path, init = {}) => handle(new Request(new URL(path, base), init));
+    const token = store.issueTokens(alice.id, "test-client", "irc:read", base).access_token;
+    const called = await req("/mcp/", { method: "POST", headers: { Authorization: `Bearer ${token}`,
+      "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call",
+      params: { name: "list_channels", arguments: {} } }) });
+    expect(called.status).toBe(200);
+    expect((await req("/admin/events")).status).toBe(401);
+    const bobSession = store.createSession(bob.id);
+    expect((await req("/admin/events", { headers: { Cookie: `__Host-zircon_session=${bobSession}` } })).status).toBe(401);
+    const aliceSession = store.createSession(alice.id);
+    const owner = await req("/admin/events", { headers: { Cookie: `__Host-zircon_session=${aliceSession}` } });
+    expect(owner.status).toBe(200);
+    const events = (await owner.json()).events;
+    expect(events.find(event => event.source === "irc").text).toBe("a soup joke");
+    expect(events.find(event => event.source === "diagnostic").action).toBe("tools/call:list_channels");
+    expect(JSON.stringify(events)).not.toContain(token);
+    expect((await req("/admin/events?limit=201", { headers: { Authorization: "Bearer admin-secret" } })).status).toBe(400);
+    expect((await req("/admin/events?limit=1", { headers: { Authorization: "Bearer admin-secret" } })).status).toBe(200);
+    const disabled = createHandler({ ...config, diagnosticsEnabled: false }, {}, store, async () => null);
+    expect((await disabled(new Request(`${base}/admin/events`))).status).toBe(404);
   } finally { store.close(); }
 });
 

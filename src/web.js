@@ -104,7 +104,7 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
       headers: { "Content-Type": "text/css; charset=utf-8", "Cache-Control": "public, max-age=3600", "X-Content-Type-Options": "nosniff" },
     });
 
-    if (path === "/.well-known/oauth-protected-resource" && request.method === "GET") return json({
+    if (["/.well-known/oauth-protected-resource", "/.well-known/oauth-protected-resource/mcp"].includes(path) && request.method === "GET") return json({
       resource: base, authorization_servers: [base], scopes_supported: ["irc:read", "irc:write"],
       resource_documentation: "https://toppk.github.io/zircon/api.html", resource_policy_uri: `${base}/privacy`,
     });
@@ -132,8 +132,26 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
         grant_types: ["authorization_code", "refresh_token"], response_types: ["code"] }, 201);
     }
 
+    if (path === "/admin/events" && request.method === "GET") {
+      if (!config.diagnosticsEnabled) return json({ error: "Not found" }, 404);
+      const browserUser = sessionUser(request);
+      const allowedSession = browserUser && config.diagnosticsAdminLogins?.includes(browserUser.github_login);
+      const allowedToken = equal(request.headers.get("authorization") ?? "", `Bearer ${config.adminToken}`);
+      if (!allowedSession && !allowedToken) return json({ error: "Unauthorized" }, 401);
+      const rawLimit = url.searchParams.get("limit") ?? "50";
+      const rawSince = url.searchParams.get("since");
+      if (!/^[0-9]+$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 200 ||
+          (rawSince !== null && (Number.isNaN(Date.parse(rawSince)) || rawSince.length > 40)) ||
+          [...url.searchParams.keys()].some(key => !["limit", "since"].includes(key))) {
+        return json({ error: "Invalid diagnostics query" }, 400);
+      }
+      const since = rawSince === null ? null : new Date(rawSince).toISOString();
+      return json({ capturedAt: new Date().toISOString(), events: store.adminEvents(since, Number(rawLimit)) });
+    }
+
     if (path === "/privacy" && request.method === "GET") return page("Zircon privacy", `<p>Zircon uses GitHub to identify invited users. It stores your GitHub username and numeric ID, IRC settings, browser sessions, hashed OAuth tokens, and an audit of messages you send. It does not store your GitHub access token after sign-in.</p>
       <p>Zircon stores channel messages and activity seen through your own ZNC account for up to ${config.historyRetentionDays ?? 7} days or ${config.historyMaxPerChannel ?? 5000} entries per channel, whichever limit is reached first. Times marked as server time came from IRC; observed times mark when Zircon saw a line. ChatGPT receives messages and activity when you use the MCP read tools. Staying online lets Zircon keep recording; going offline stops new collection.</p>
+      ${config.diagnosticsEnabled ? `<p>While diagnostics are enabled, Zircon also keeps up to 2000 recent MCP call and IRC connection records for up to ${config.historyRetentionDays ?? 7} days. These records include the signed-in user, action, time and result, but not OAuth tokens or tool arguments. Only the owner can view them.</p>` : ""}
       <p>Your IRC nickname, channels, and messages are visible to people on the IRC networks you use. The database and ZNC buffers are included in host backups and may remain there beyond live retention until those backups expire. Contact the Zircon owner to request account removal.</p>`);
 
     if (path === "/oauth/authorize" && request.method === "GET") {
@@ -269,7 +287,9 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
       const selected = new Set(JSON.parse(user.selected_channels));
       const options = allowed.map(channel => `<label><input type="checkbox" name="channel" value="${escapeHtml(channel)}" ${selected.has(channel) ? "checked" : ""}>${escapeHtml(channel)}</label>`).join("<br>");
       const networks = config.ircNetworks.map(network => `<option value="${escapeHtml(network.name)}" ${network.name === user.network_name ? "selected" : ""}>${escapeHtml(network.name)} (${escapeHtml(network.host)})</option>`).join("");
-      return page("Zircon settings", `<p>GitHub: ${escapeHtml(user.github_login)}</p><p>IRC is ${user.online ? "online" : "offline"}. Staying online records new channel activity and enables future mention events. ChatGPT can use go_offline and go_online when you ask it to change your presence.</p><form method="post" action="/settings">
+      const diagnosticsLink = config.diagnosticsEnabled && config.diagnosticsAdminLogins?.includes(user.github_login)
+        ? '<p><a href="/admin/events">View recent diagnostics</a></p>' : "";
+      return page("Zircon settings", `<p>GitHub: ${escapeHtml(user.github_login)}</p><p>IRC is ${user.online ? "online" : "offline"}. Staying online records new channel activity and enables future mention events. ChatGPT can use go_offline and go_online when you ask it to change your presence.</p>${diagnosticsLink}<form method="post" action="/settings">
         <input type="hidden" name="csrf" value="${csrf(config, cookieValue(request))}">
         <label>IRC network <select name="network_name">${networks}</select></label>
         <label>IRC nick <input name="nick" maxlength="31" value="${escapeHtml(user.nick)}" required></label>

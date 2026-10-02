@@ -8,10 +8,11 @@ export const tokenHash = token => createHash("sha256").update(token).digest("hex
 const now = () => Date.now();
 
 export class Store {
-  constructor(path, { historyRetentionDays = 7, historyMaxPerChannel = 5000 } = {}) {
+  constructor(path, { historyRetentionDays = 7, historyMaxPerChannel = 5000, diagnosticsEnabled = false } = {}) {
     this.path = path;
     this.historyRetentionDays = historyRetentionDays;
     this.historyMaxPerChannel = historyMaxPerChannel;
+    this.diagnosticsEnabled = diagnosticsEnabled;
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new Database(path, { create: true });
     this.db.run("PRAGMA journal_mode = WAL");
@@ -81,6 +82,11 @@ export class Store {
         channel TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL,
         created_at INTEGER NOT NULL, PRIMARY KEY(user_id,idempotency_key)
       );
+      CREATE TABLE IF NOT EXISTS diagnostic_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, occurred_at INTEGER NOT NULL,
+        user_id TEXT, category TEXT NOT NULL, action TEXT NOT NULL, result TEXT NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS diagnostic_events_time ON diagnostic_events(occurred_at,id);
     `);
     for (const table of ["auth_requests", "auth_codes", "tokens"]) {
       if (!this.db.query(`PRAGMA table_info(${table})`).all().some(column => column.name === "resource")) {
@@ -343,6 +349,29 @@ export class Store {
     if (this.historyRecorded % 100 === 0) this.pruneActivity();
   }
 
+  recordDiagnostic(user, category, action, result = "") {
+    if (!this.diagnosticsEnabled) return;
+    this.db.query("INSERT INTO diagnostic_events(occurred_at,user_id,category,action,result) VALUES (?,?,?,?,?)")
+      .run(now(), user?.id ?? null, String(category).slice(0, 32), String(action).slice(0, 100), String(result).slice(0, 64));
+    this.db.run("DELETE FROM diagnostic_events WHERE id NOT IN (SELECT id FROM diagnostic_events ORDER BY id DESC LIMIT 2000)");
+  }
+
+  adminEvents(since = null, limit = 50) {
+    const sinceTime = since ?? "1970-01-01T00:00:00.000Z";
+    const diagnostics = this.db.query(`SELECT d.occurred_at,d.category,d.action,d.result,u.github_login AS user
+      FROM diagnostic_events d LEFT JOIN users u ON u.id=d.user_id
+      WHERE d.occurred_at >= ? ORDER BY d.occurred_at DESC,d.id DESC LIMIT ?`).all(Date.parse(sinceTime), limit)
+      .map(row => ({ source: "diagnostic", time: new Date(row.occurred_at).toISOString(), user: row.user,
+        category: row.category, action: row.action, result: row.result }));
+    const activity = this.db.query(`SELECT a.time,a.observed_at AS observedAt,a.timestamp_source AS timestampSource,
+      a.network,a.channel,a.kind,a.nick,a.text,u.github_login AS user
+      FROM channel_activity a LEFT JOIN users u ON u.id=a.user_id
+      WHERE a.observed_at >= ? ORDER BY a.observed_at DESC,a.id DESC LIMIT ?`).all(sinceTime, limit)
+      .map(row => ({ source: "irc", ...row }));
+    return [...diagnostics, ...activity].sort((a, b) =>
+      (b.observedAt ?? b.time).localeCompare(a.observedAt ?? a.time)).slice(0, limit);
+  }
+
   recentActivity(user, channel, limit = 50) {
     return this.db.query(`SELECT id,network,channel,kind,time,observed_at AS observedAt,
       timestamp_source AS timestampSource,nick,text,target FROM channel_activity
@@ -391,5 +420,6 @@ export class Store {
       WHERE rank > ?)`)
       .run(this.historyMaxPerChannel);
     this.db.query("DELETE FROM post_requests WHERE created_at < ?").run(now() - 7 * 86_400_000);
+    this.db.query("DELETE FROM diagnostic_events WHERE occurred_at < ?").run(now() - this.historyRetentionDays * 86_400_000);
   }
 }

@@ -25,6 +25,7 @@ services.zircon = {
 |---|---|---|
 | `port` | `3000` | loopback HTTP port for the reverse proxy |
 | `maxUsers` | `16` | most users Zircon will create (1 to 100) |
+| `enableDiagnostics` | `false` | expose owner-only `/admin/events` and store bounded MCP/connection diagnostics |
 | `historyRetentionDays` | `7` | maximum days of channel history (1 to 365) |
 | `historyMaxPerChannel` | `5000` | maximum entries per user and channel (100 to 100000) |
 | `environmentFile` | none, required | secrets file outside `/nix/store` |
@@ -38,6 +39,7 @@ services.zircon = {
 | `settings.ircUsername` | `zircon` | IRC username (ident) |
 | `settings.ircRealname` | `Zircon ChatGPT bridge` | prefix for each user's IRC real name; their GitHub login is appended |
 | `settings.ircChannels` | required | channels the owner may grant |
+| `settings.diagnosticsAdminLogins` | `[]` | GitHub logins that can view diagnostics with a browser session |
 
 The service runs with `DynamicUser`, `StateDirectory=zircon`,
 `ProtectSystem=strict`, no capabilities, and logs to stdout.
@@ -69,6 +71,7 @@ Outside NixOS, Zircon reads the same settings from the environment:
 `OAUTH_REDIRECT_URIS` (optional, comma separated), `IRC_CHANNELS` (comma separated),
 `IRC_NETWORKS_JSON`, `ZNC_ADMIN_USER`, plus optional `PORT`, `MAX_USERS`,
 `HISTORY_RETENTION_DAYS`, `HISTORY_MAX_PER_CHANNEL`,
+`DIAGNOSTICS_ENABLED`, `DIAGNOSTICS_ADMIN_LOGINS`,
 `STATE_DIR` (default `/var/lib/zircon`), `ZNC_HOST`, `ZNC_PORT`,
 `IRC_USERNAME` and `IRC_REALNAME`.
 

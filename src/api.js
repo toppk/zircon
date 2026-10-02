@@ -6,7 +6,7 @@ const json = (body, status = 200) => Response.json(body, { status, headers: { "C
 export function openApi(config) {
   return {
     openapi: "3.1.0",
-    info: { title: "Zircon IRC", version: "0.4.0", description: "Read and send messages in your configured IRC channels." },
+    info: { title: "Zircon IRC", version: "0.4.1", description: "Read and send messages in your configured IRC channels." },
     servers: [{ url: config.publicBaseUrl }],
     components: { securitySchemes: { zirconOAuth: { type: "oauth2", flows: { authorizationCode: {
       authorizationUrl: `${config.publicBaseUrl}/oauth/authorize`, tokenUrl: `${config.publicBaseUrl}/oauth/token`,
@@ -36,7 +36,29 @@ export function createHandler(config, pool, store, getGithubIdentity) {
     const url = new URL(request.url, config.publicBaseUrl);
     if (request.method === "GET" && url.pathname === "/healthz") return json({ ok: true });
     if (request.method === "GET" && url.pathname === "/openapi.json") return json(schema);
-    if (url.pathname === "/mcp") return mcp(request);
+    if (url.pathname === "/mcp" || url.pathname === "/mcp/") {
+      if (!config.diagnosticsEnabled) return mcp(request);
+      let call;
+      if (request.method === "POST") {
+        try { call = await request.clone().json(); } catch { /* malformed requests are still logged */ }
+      }
+      const method = typeof call?.method === "string" && /^[a-zA-Z0-9/_-]{1,80}$/.test(call.method)
+        ? call.method : request.method;
+      const tool = method === "tools/call" && /^[a-z0-9_]{1,64}$/.test(call?.params?.name ?? "")
+        ? `:${call.params.name}` : "";
+      const token = /^Bearer ([A-Za-z0-9_-]+)$/.exec(request.headers.get("authorization") ?? "")?.[1];
+      const user = store.accessUser(token, "irc:read", config.publicBaseUrl) ??
+        store.accessUser(token, "irc:write", config.publicBaseUrl);
+      const reply = await mcp(request);
+      let result = String(reply.status);
+      try {
+        const body = await reply.clone().json();
+        if (typeof body?.error?.code === "number") result += `/${body.error.code}`;
+      } catch { /* notifications and empty replies have no JSON body */ }
+      try { store.recordDiagnostic(user, "mcp", `${method}${tool}`, result); }
+      catch (error) { console.error("Could not record MCP diagnostic:", error.message); }
+      return reply;
+    }
     const webResponse = await web(request);
     if (webResponse) return webResponse;
     const match = /^\/v1\/channels\/([^/]+)\/messages$/.exec(url.pathname);

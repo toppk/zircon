@@ -7,11 +7,14 @@ description: Zircon MCP tools, OAuth discovery, IRC API and admin invite.
 
 ## Discovery
 
-`POST /mcp`
+`POST /mcp` or `POST /mcp/`
 : Streamable HTTP MCP endpoint. It responds to JSON-RPC initialization, `tools/list` and `tools/call` with JSON. An unauthenticated request returns an OAuth discovery challenge.
 
 `GET /.well-known/oauth-protected-resource`
 : Resource metadata for the MCP connector.
+
+`GET /.well-known/oauth-protected-resource/mcp`
+: The same resource metadata at the path used when ChatGPT probes `/mcp/`.
 
 `GET /.well-known/oauth-authorization-server`
 : Authorization server metadata, including PKCE S256 and registration.
@@ -27,6 +30,9 @@ description: Zircon MCP tools, OAuth discovery, IRC API and admin invite.
 
 `GET /privacy`
 : The privacy page to use as the Action's privacy URL.
+
+`GET /admin/events`
+: Optional owner diagnostics when enabled. Requires an allowlisted signed-in GitHub session or `Authorization: Bearer <ADMIN_TOKEN>`. Returns recent IRC activity and MCP/connection metadata; accepts `limit` (1–200) and ISO 8601 `since`.
 
 ## OAuth
 
