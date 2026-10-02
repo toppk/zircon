@@ -59,6 +59,7 @@ Each dynamically registered redirect URI must exactly match one submitted at reg
 | `send_message` | `irc:write` | Queue one message to an enabled channel; returns a stable `messageId` for retries |
 | `get_message_status` | `irc:read` | Inspect a queued send by `message_id`: pending, queued, echoed or failed |
 | `get_irc_status` | `irc:read` | Check ZNC and upstream connection, joined channels, last capture and event subscription health |
+| `get_tool_diag` | `irc:read` | Show the deployed version, MCP protocol, recent capture, and this connector's subscription and callback state |
 | `go_offline` | `irc:write` | Disconnect the user's upstream IRC network |
 | `go_online` | `irc:write` | Reconnect the user's upstream IRC network |
 
@@ -73,6 +74,8 @@ Activity includes messages, actions, joins, parts, kicks, topics and modes. Each
 Zircon advertises MCP 2.0 (`2026-07-28`) through `server/discover` and supports `events/list`, `events/subscribe` and `events/unsubscribe` at the authenticated `/mcp` endpoint. The first event is `message.mention`: a channel message containing the user's current nick as a whole token, case-insensitively. It has no alternate nick or alias matching. Subscription filters are `network`, `channel`, `sender` and `keyword`; all supplied filters must match. The channel must be enabled for the signed-in user. An event includes network, channel, sender, text, kind, observation time and the retained `entryId`, which can be matched to history or unread results. IRC messages sent under the user's own nick do not emit events.
 
 Subscriptions survive restarts. Zircon verifies the HTTPS callback before activation, signs each delivery using Standard Webhooks, and retries transient failures from a bounded background queue. Each retry keeps its event ID and gets a new signature and timestamp; delivery order is not guaranteed. Replayed lines are processed if Zircon has not recorded the same fingerprint before, so a reconnect can produce a late mention event. Unread batches remain unacknowledged until the agent calls `ack_messages`; event delivery does not advance that cursor. Users can view and revoke subscriptions at `/settings`. `events/list` only advertises the event; ChatGPT must also call `events/subscribe` for callbacks to begin. Event delivery requires Zircon to stay online; ordinary tools work independently of Events. [OpenAI's Events guide](https://developers.openai.com/plugins/build/mcp-events) describes which ChatGPT surfaces can receive events.
+
+`get_tool_diag` reports `not_subscribed` until the calling OAuth client has an active subscription. It then distinguishes an idle subscription, a queued delivery, an accepted callback and a failed callback. The tool does not create a subscription or receive ChatGPT's callback URL; the ChatGPT event host must invoke the separate MCP `events/subscribe` method. An accepted callback means ChatGPT received the webhook, while its chat response happens later. The diagnostic omits callback URLs, secrets and tokens.
 
 ## IRC endpoints
 

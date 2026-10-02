@@ -1,13 +1,14 @@
 import { createWebHandler } from "./web.js";
 import { createMcpHandler } from "./mcp.js";
 import { EventService } from "./events.js";
+import { version } from "./version.js";
 
 const json = (body, status = 200) => Response.json(body, { status, headers: { "Cache-Control": "no-store" } });
 
 export function openApi(config) {
   return {
     openapi: "3.1.0",
-    info: { title: "Zircon IRC", version: "0.6.0", description: "Read and send messages in your configured IRC channels." },
+    info: { title: "Zircon IRC", version, description: "Read and send messages in your configured IRC channels." },
     servers: [{ url: config.publicBaseUrl }],
     components: { securitySchemes: { zirconOAuth: { type: "oauth2", flows: { authorizationCode: {
       authorizationUrl: `${config.publicBaseUrl}/oauth/authorize`, tokenUrl: `${config.publicBaseUrl}/oauth/token`,

@@ -1,3 +1,5 @@
+import { version } from "./version.js";
+
 const object = properties => ({ type: "object", properties, additionalProperties: false });
 const string = { type: "string" };
 const entry = { ...object({ entryId: string, messageId: { type: ["string", "null"] },
@@ -95,6 +97,23 @@ const tools = [
     securitySchemes: [{ type: "oauth2", scopes: ["irc:read"] }],
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
+  {
+    name: "get_tool_diag", title: "Diagnose Zircon tool and event state",
+    description: "Check the deployed Zircon version and this connector's event subscription and callback state. Use this when IRC messages are captured but no event wakes the chat. Events are subscribed through the MCP events/subscribe method by a supported ChatGPT Work chat, not through an ordinary Zircon tool.",
+    inputSchema: object({}),
+    outputSchema: { ...object({ version: string, mcpProtocol: string,
+      availableEvents: { type: "array", items: string }, online: { type: "boolean" },
+      zncSession: { type: "string", enum: ["offline", "connecting", "connected"] },
+      lastReceived: { anyOf: [received, { type: "null" }] },
+      eventSubscriptionCount: { type: "integer" }, pendingDeliveries: { type: "integer" },
+      lastEventAttemptAt: cursor, lastEventDeliveryStatus: cursor,
+      eventState: { type: "string", enum: ["not_subscribed", "subscribed_idle", "delivery_pending", "delivery_accepted", "delivery_failed"] },
+      nextStep: string }),
+      required: ["version", "mcpProtocol", "availableEvents", "online", "zncSession", "lastReceived",
+        "eventSubscriptionCount", "pendingDeliveries", "lastEventAttemptAt", "lastEventDeliveryStatus", "eventState", "nextStep"] },
+    securitySchemes: [{ type: "oauth2", scopes: ["irc:read"] }],
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: false },
+  },
   ...[false, true].map(online => ({
     name: online ? "go_online" : "go_offline", title: online ? "Go online on IRC" : "Go offline on IRC",
     description: online
@@ -139,7 +158,7 @@ export function createMcpHandler(config, store, pool, events) {
     if (call.method === "initialize") return result(call.id, {
       protocolVersion: call.params?.protocolVersion === "2026-07-28" ? "2026-07-28" : "2025-06-18",
       capabilities: { tools: { listChanged: false }, events: {} },
-      serverInfo: { name: "zircon-irc", title: "Zircon IRC", version: "0.6.0" },
+      serverInfo: { name: "zircon-irc", title: "Zircon IRC", version },
       instructions: "Use list_channels, then read_unread for normal channel reading. Process each batch and call ack_messages with its batchId; unacknowledged batches are returned again. get_history and search_messages do not change unread state. Staying online records new activity and delivers subscribed mention events. Sending an IRC message is public and irreversible; confirm its destination and text unless the user explicitly authorized automatic replies in this chat and channel.",
     });
     if (call.method === "ping") return result(call.id, {});
@@ -254,6 +273,25 @@ export function createMcpHandler(config, store, pool, events) {
         captureContinuity: "unverified", activeSubscriptions: status.activeSubscriptions,
         pendingDeliveries: status.pendingDeliveries, lastEventAttemptAt: status.lastEventAttemptAt,
         lastEventDeliveryStatus: status.lastEventDeliveryStatus });
+    }
+    if (name === "get_tool_diag") {
+      if (Object.keys(args).length) return error(call.id, -32602, "Invalid arguments");
+      const status = store.captureStatus(user);
+      const event = store.clientEventStatus(user, readPrincipal.clientId);
+      const accepted = /^2\d\d$/.test(event.lastEventDeliveryStatus ?? "");
+      const eventState = event.eventSubscriptionCount === 0 ? "not_subscribed" :
+        event.pendingDeliveries > 0 ? "delivery_pending" :
+          !event.lastEventAttemptAt ? "subscribed_idle" : accepted ? "delivery_accepted" : "delivery_failed";
+      const nextStep = {
+        not_subscribed: "No push delivery is active. In a supported ChatGPT Work chat, ask ChatGPT to monitor message.mention. ChatGPT must invoke MCP events/subscribe; this is separate from Zircon's ordinary tools.",
+        subscribed_idle: "A subscription is active. Send a message addressing the current IRC nick, then check this diagnostic again.",
+        delivery_pending: "A matching event is queued. Check this diagnostic again after the background worker runs.",
+        delivery_accepted: "The receiver accepted the last callback. ChatGPT processes events asynchronously; acceptance does not prove a chat response.",
+        delivery_failed: "The last callback was not accepted. Check the owner diagnostics and the receiver before relying on event delivery.",
+      }[eventState];
+      return toolResult(call.id, { version, mcpProtocol: "2026-07-28", availableEvents: ["message.mention"],
+        online: Boolean(user.online), zncSession: pool.connectionState?.(user) ?? (user.online ? "connecting" : "offline"),
+        lastReceived: status.lastReceived, ...event, eventState, nextStep });
     }
     if (name === "search_messages") {
       const channels = JSON.parse(user.selected_channels);

@@ -528,6 +528,21 @@ export class Store {
       captureGapPossibleSince: state.lastDisconnectAt };
   }
 
+  clientEventStatus(user, clientId) {
+    const subscriptions = this.db.query(`SELECT count(*) AS count,max(last_attempt_at) AS lastAttemptAt
+      FROM event_subscriptions WHERE user_id=? AND client_id=? AND active=1 AND (expires_at IS NULL OR expires_at>?)`)
+      .get(user.id, clientId, now());
+    const lastDelivery = this.db.query(`SELECT last_delivery_status AS status FROM event_subscriptions
+      WHERE user_id=? AND client_id=? AND active=1 AND last_attempt_at IS NOT NULL
+      ORDER BY last_attempt_at DESC LIMIT 1`).get(user.id, clientId);
+    const pending = this.db.query(`SELECT count(*) AS count FROM event_deliveries d
+      JOIN event_subscriptions s ON s.id=d.subscription_id WHERE s.user_id=? AND s.client_id=?`)
+      .get(user.id, clientId).count;
+    return { eventSubscriptionCount: subscriptions.count, pendingDeliveries: pending,
+      lastEventAttemptAt: subscriptions.lastAttemptAt === null ? null : new Date(subscriptions.lastAttemptAt).toISOString(),
+      lastEventDeliveryStatus: lastDelivery?.status ?? null };
+  }
+
   eventSubscriptionId(user, clientId, name, args, url) {
     const canonical = JSON.stringify(Object.fromEntries(Object.entries(args).sort(([a], [b]) => a.localeCompare(b))));
     return `sub_${createHash("sha256").update(JSON.stringify([user.id, clientId, name, canonical, url])).digest("base64url").slice(0, 32)}`;

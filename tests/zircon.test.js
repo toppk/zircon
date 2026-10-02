@@ -209,7 +209,7 @@ test("MCP discovery, OAuth, history, posting and presence tools", async () => {
       Authorization: `Bearer ${tokens.access_token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }) });
     expect((await slashList.json()).result.tools.map(tool => tool.name)).toEqual(listed.map(tool => tool.name));
-    expect(listed.map(tool => tool.name)).toEqual(["list_channels", "read_unread", "ack_messages", "get_history", "search_messages", "send_message", "get_message_status", "get_irc_status", "go_offline", "go_online"]);
+    expect(listed.map(tool => tool.name)).toEqual(["list_channels", "read_unread", "ack_messages", "get_history", "search_messages", "send_message", "get_message_status", "get_irc_status", "get_tool_diag", "go_offline", "go_online"]);
     expect(listed.every(tool => tool.outputSchema && ["readOnlyHint", "destructiveHint", "openWorldHint"].every(key => typeof tool.annotations?.[key] === "boolean"))).toBe(true);
     expect(listed.find(tool => tool.name === "send_message").annotations.destructiveHint).toBe(true);
     expect((await (await mcp("tools/call", { name: "list_channels", arguments: {} })).json()).result.structuredContent.channels).toEqual(["#soup"]);
@@ -248,6 +248,12 @@ test("MCP discovery, OAuth, history, posting and presence tools", async () => {
     expect(status.nick).toBe("alice");
     expect(status.upstreamConnected).toBeNull();
     expect(status.lastReceived.entryId).toBe(echoed.entryId);
+    const diag = (await (await mcp("tools/call", { name: "get_tool_diag", arguments: {} })).json()).result.structuredContent;
+    expect(diag.version).toBe("0.6.1");
+    expect(diag.eventState).toBe("not_subscribed");
+    expect(diag.eventSubscriptionCount).toBe(0);
+    expect(diag.nextStep).toContain("events/subscribe");
+    expect(diag.lastReceived.entryId).toBe(echoed.entryId);
     expect((await (await mcp("tools/call", { name: "send_message", arguments: outgoing })).json()).result.structuredContent.status).toBe("echoed");
     expect(sent).toEqual([["#soup", "hello room"]]);
     expect(store.db.query("SELECT count(*) AS count FROM audit").get().count).toBe(1);
@@ -440,11 +446,14 @@ test("MCP mention subscriptions verify callbacks, persist, filter, sign and unsu
     expect(validWebhookSecret("whsec_bad")).toBe(false);
     expect((await rpc("server/discover")).result.supportedVersions).toContain("2026-07-28");
     expect((await rpc("events/list")).result.events[0].name).toBe("message.mention");
+    const diagnostic = () => rpc("tools/call", { name: "get_tool_diag", arguments: {} });
+    expect((await diagnostic()).result.structuredContent.eventState).toBe("not_subscribed");
     expect((await rpc("events/subscribe", { name: "message.mention", arguments: { channel: "#other" }, delivery })).error.code).toBe(-32602);
     const subscribed = (await rpc("events/subscribe", { name: "message.mention", arguments: args,
       delivery, ttlMs: null })).result;
     expect(subscribed.refreshBefore).toBeNull();
     expect(subscribed.id).toStartWith("sub_");
+    expect((await diagnostic()).result.structuredContent.eventState).toBe("subscribed_idle");
     expect(deliveries[0].headers["webhook-signature"]).toBe(webhookSignature(secret,
       deliveries[0].headers["webhook-id"], deliveries[0].headers["webhook-timestamp"], deliveries[0].body));
     const time = new Date().toISOString();
@@ -455,6 +464,7 @@ test("MCP mention subscriptions verify callbacks, persist, filter, sign and unsu
     activity("alice", "alice likes soup");
     const eventEntryId = activity("bob", "hello alice, soup is ready");
     expect(store.db.query("SELECT count(*) AS count FROM event_deliveries").get().count).toBe(1);
+    expect((await diagnostic()).result.structuredContent.eventState).toBe("delivery_pending");
     store.close();
     store = new Store(path);
     events.store = store;
@@ -469,6 +479,7 @@ test("MCP mention subscriptions verify callbacks, persist, filter, sign and unsu
       entry.entryId === sent.data.entryId)).toBe(true);
     expect(deliveries.at(-1).headers["webhook-id"]).toBe(sent.eventId);
     expect(store.db.query("SELECT count(*) AS count FROM event_deliveries").get().count).toBe(0);
+    expect((await diagnostic()).result.structuredContent.eventState).toBe("delivery_accepted");
     expect((await rpc("events/unsubscribe", { name: "message.mention", arguments: args,
       delivery: { mode: "webhook", url: callbackUrl } })).result).toEqual({});
     expect(store.listEventSubscriptions(store.userById(user.id))).toHaveLength(0);
@@ -511,6 +522,8 @@ test("event worker retries transient failures with one ID and drops a gone subsc
     await service.drain();
     expect(sent).toHaveLength(1);
     expect(store.db.query("SELECT attempts FROM event_deliveries").get().attempts).toBe(1);
+    expect(store.clientEventStatus(user, "agent-a").lastEventDeliveryStatus).toBe("503");
+    expect(store.clientEventStatus(user, "agent-a").pendingDeliveries).toBe(1);
     store.db.query("UPDATE event_deliveries SET next_attempt_at=0").run();
     await service.drain();
     expect(sent).toHaveLength(2);
