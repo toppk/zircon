@@ -19,7 +19,7 @@
               settings = {
                 githubClientId = "test-github-id";
                 oauthRedirectUris = [ "https://chatgpt.com/aip/g-example/oauth/callback" ];
-                ircChannels = [ "#soup" ];
+                ircChannels = [ "#lobby" "#soup" ];
               };
             };
           }

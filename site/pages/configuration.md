@@ -16,7 +16,7 @@ services.zircon = {
   environmentFile = "/var/lib/zircon-secrets/zircon.env";
   settings = {
     githubClientId = "<GitHub OAuth app client ID>";
-    ircChannels = [ "#soup" ];
+    ircChannels = [ "#lobby" "#soup" ];
   };
 };
 ```

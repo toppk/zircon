@@ -43,7 +43,7 @@ Provisioning sets each ZNC user's IRC real name to `Zircon ChatGPT bridge for <g
 
 The NixOS module `services.zircon` uses `DynamicUser`, a private state directory, hardened systemd settings, stdout logging, and an environment file outside the Nix store. Supply `environmentFile = "/var/lib/zircon-secrets/zircon.env"`. Put these **names** in that file: `GITHUB_CLIENT_SECRET`, `OAUTH_CLIENT_SECRET`, `SESSION_SECRET`, `ADMIN_TOKEN`, `ZNC_ADMIN_PASSWORD`, `ZNC_USER_SECRET`. GitHub issues `GITHUB_CLIENT_SECRET`; generate the others on ne2.
 
-Set `settings.githubClientId` to the ID of a GitHub OAuth app with callback `https://zircon.chooser.us/login/github/callback`. GitHub handles sign-in; Zircon is the OAuth authorization server for the MCP connector. `settings.oauthRedirectUris` is optional and now only serves the legacy GPT Action client. Add owner-approved IRC servers to `settings.ircNetworks`; it defaults to `chonkbase` at `irc.chonkbase.net:6697` with TLS. The owner has permission to connect Zircon to chonkbase. Users choose among that list and set their own nick at `/settings`. `settings.ircChannels` defines channels the owner can grant in invitations, initially `#soup`. The module caps users at 16 by default because ne2 has 1 GB total RAM shared with other services. `historyRetentionDays` defaults to 7 and `historyMaxPerChannel` to 5000 per user and channel.
+Set `settings.githubClientId` to the ID of a GitHub OAuth app with callback `https://zircon.chooser.us/login/github/callback`. GitHub handles sign-in; Zircon is the OAuth authorization server for the MCP connector. `settings.oauthRedirectUris` is optional and now only serves the legacy GPT Action client. Add owner-approved IRC servers to `settings.ircNetworks`; it defaults to `chonkbase` at `irc.chonkbase.net:6697` with TLS. The owner has permission to connect Zircon to chonkbase. Users choose among that list and set their own nick at `/settings`. `settings.ircChannels` defines channels the owner can grant in invitations; the current catalog is `#lobby` and `#soup`. The module caps users at 16 by default because ne2 has 1 GB total RAM shared with other services. `historyRetentionDays` defaults to 7 and `historyMaxPerChannel` to 5000 per user and channel.
 
 Example:
 
@@ -55,7 +55,7 @@ services.zircon = {
   settings = {
     githubClientId = "<GitHub OAuth app client ID>";
     zncAdminUser = "zirconctl";
-    ircChannels = [ "#soup" ];
+    ircChannels = [ "#lobby" "#soup" ];
     diagnosticsAdminLogins = [ "toppk" ];
   };
 };
@@ -71,7 +71,7 @@ The consent and settings pages load `/ui.css` and `/logo.png` from Zircon. The a
 
 When `enableDiagnostics = true`, `GET /admin/events` returns recent IRC activity and metadata for MCP calls and IRC connection changes. It accepts `limit` (1–200) and optional ISO 8601 `since`. The owner can use a signed-in browser session if their GitHub login is in `diagnosticsAdminLogins`; automation can use `Authorization: Bearer <ADMIN_TOKEN>`. Keep that token out of chat and logs. Diagnostics store no OAuth tokens or tool arguments, are capped at 2000 records, and are pruned with the configured history retention. Channel text is returned from the existing per-user history store. Leave diagnostics disabled on deployments that do not need this view.
 
-The tools and event methods return JSON directly, so this version does not need a long-lived response stream. Raise HAProxy's 25-second server timeout if callback verification might take longer through a slow network. Automated tests cover registration, consent, PKCE, resource-bound tokens, independent agent mailboxes, history, posting, presence, subscription verification, signed deliveries and retries. ChatGPT developer mode exercised listing, unread reads, history, search and a send on Zircon 0.5.0. Test a mention subscription in a supported ChatGPT Work surface after deploying 0.7.0.
+The tools and event methods return JSON directly, so this version does not need a long-lived response stream. Raise HAProxy's 25-second server timeout if callback verification might take longer through a slow network. Automated tests cover registration, consent, PKCE, resource-bound tokens, independent agent mailboxes, history, posting, presence, subscription verification, signed deliveries and retries. ChatGPT developer mode exercised listing, unread reads, history, search and a send on Zircon 0.5.0. Test a mention subscription in a supported ChatGPT Work surface after deploying 0.7.1.
 
 On 2026-10-02, Zircon 0.6.0 captured `zircom are you feeling lucky?` in `#soup`. Later, ChatGPT called `events/subscribe` twice, but both calls failed with MCP `-32015`. The ne2 journal identified the cause: Bun's HTTPS connection requested an all-address DNS lookup, while Zircon's pinned callback lookup returned a scalar address (`results.sort is not a function`). Version 0.7.0 returns the address shape Bun requests and records callback verification failures in owner diagnostics. No subscription or webhook delivery succeeded in that live test. The chat's ordinary tool list does not contain `events/subscribe`: it is a separate MCP protocol method invoked by ChatGPT's event host. [OpenAI's MCP Events guide](https://developers.openai.com/plugins/build/mcp-events) says to use a Work chat on web, Work with Cloud on desktop, or a dot, then ask ChatGPT to monitor an event. After deployment, confirm `events/subscribe` succeeds, `see_account_information.mentionEvents` reports an active subscription, a matching nick mention queues a delivery, and the callback returns 2xx before claiming push delivery works in ChatGPT. An ordinary chat that only calls tools cannot establish this.
 
@@ -81,10 +81,12 @@ Version 0.7.0 adds persistent agent mailbox sessions and their independent unrea
 
 ## How a new user joins
 
-1. The owner invites a GitHub username with `POST /admin/invite`, authenticated by `ADMIN_TOKEN`, and assigns allowed channels such as `#soup`.
+1. The owner invites a GitHub username with `POST /admin/invite`, authenticated by `ADMIN_TOKEN`, and grants allowed channels such as `#soup`. New accounts start with no channels enabled. Re-inviting preserves already enabled channels that remain allowed; new grants stay off, and revoked grants are removed from the selection.
 2. The owner sends the user the private MCP connection. The user connects it, signs in with GitHub, and consents to IRC read access. Zircon binds their GitHub numeric ID on first sign-in.
-3. The user visits `/settings` to select an approved IRC server, their own nickname, display name, and channels from the owner's invitation. Zircon updates their separate ZNC account through `controlpanel` and saves ZNC's configuration.
+3. The user visits `/settings` to select an approved IRC server, their own nickname, display name, and channels from the owner's invitation. Saving a changed selection rebuilds that user's ZNC network through `controlpanel` without restarting ZNC; unchecked channels are no longer joined. Previously stored history is retained until normal pruning but is inaccessible through MCP while the channel is disabled.
 4. Zircon stays attached to that user's ZNC account while online and records channel activity with stable entry IDs and event and observation timestamps. An agent first calls `see_account_information` to see the nick, server, presence and recent capture, and receives its own mailbox session ID. It passes that ID to `read_history(mode=unread)` and `ack_messages`; ordinary recent and last-hour reads need no acknowledgement. The user can revoke mention subscriptions in `/settings`. `send_message` reports that the line was queued to ZNC; `get_message_status` can later report a matching server echo. `go_offline` disconnects the account's upstream network and local ZNC session for all its agents; `go_online` resumes it.
+
+For the current owner account, deploy this version with `ircChannels = [ "#lobby" "#soup" ]`, then update `toppk`'s invitation to grant both channels. The re-invite keeps `#soup` enabled and leaves the new `#lobby` grant unchecked. Adding that grant does not rebuild or disconnect the existing ZNC session. The owner can opt into `#lobby` later in `/settings`; there is no automatic join.
 
 ## Planned work
 

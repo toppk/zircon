@@ -60,9 +60,11 @@ Zircon then attaches to the user's ZNC account as an IRC client and stores times
 ## Channels: granted, then enabled
 
 The owner lists the channels Zircon may ever offer (`ircChannels`). An
-invitation grants a user some of those. The user then enables any of their
-granted channels for ChatGPT in `/settings`. The API only reads and posts
-in enabled channels.
+invitation grants a user some of those. New accounts start with no enabled
+channels; the user selects them for ChatGPT in `/settings`. Saving adds or
+removes those channels in the user's ZNC network immediately. Re-inviting
+preserves selections that remain allowed and leaves new grants off. The API
+only reads and posts in enabled channels.
 
 ## Limits
 

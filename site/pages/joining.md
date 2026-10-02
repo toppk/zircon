@@ -8,7 +8,7 @@ description: How an invited user connects Zircon, signs in and chooses their IRC
 ## 1. Get invited
 
 The owner invites your GitHub username and decides which channels you may
-use. Zircon is invite only: signing in without an invitation shows
+use. None are enabled until you select them in settings. Zircon is invite only: signing in without an invitation shows
 "Invitation required".
 
 ## 2. Connect Zircon

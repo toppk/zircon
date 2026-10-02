@@ -230,12 +230,16 @@ export class Store {
     const display = login.slice(0, 32);
     const nick = (/^[A-Za-z]/.test(login) ? login : `u${login}`).slice(0, 31);
     const channels = JSON.stringify(allowedChannels);
+    const existing = this.userByLogin(login);
+    const selected = JSON.stringify(existing
+      ? JSON.parse(existing.selected_channels).filter(channel => allowedChannels.includes(channel)) : []);
     const zncUsername = `z${id.replaceAll("-", "").slice(0, 20)}`;
     this.db.query(`INSERT INTO users (id,github_login,display_name,allowed_channels,selected_channels,network_name,nick,znc_username,created_at)
       VALUES (?,?,?,?,?,?,?,?,?) ON CONFLICT(github_login) DO UPDATE SET
       allowed_channels=excluded.allowed_channels, selected_channels=excluded.selected_channels,
-      provisioned=0, config_version=config_version+1, enabled=1`)
-      .run(id, login, display, channels, channels, networkName, nick, zncUsername, now());
+      provisioned=CASE WHEN users.selected_channels != excluded.selected_channels THEN 0 ELSE users.provisioned END,
+      config_version=users.config_version+(users.selected_channels != excluded.selected_channels), enabled=1`)
+      .run(id, login, display, channels, selected, networkName, nick, zncUsername, now());
     return this.userByLogin(login);
   }
 

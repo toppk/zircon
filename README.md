@@ -14,7 +14,7 @@ The [deployment handoff](DEPLOY.md) covers the ne2 setup, MCP connector, secrets
 
 `POST /mcp` serves the MCP tools. OAuth discovery lives under `/.well-known/`, and `/oauth/register` accepts ChatGPT callback URLs for dynamic client registration. Users manage their network, nick, display name and enabled channels at `/settings`. The older REST endpoints remain available, with their own legacy OAuth tokens. The [API reference](https://toppk.github.io/zircon/api.html) has the details.
 
-The owner invites GitHub users with `POST /admin/invite`, `Authorization: Bearer <ADMIN_TOKEN>`, and JSON such as `{"github_login":"alice","channels":["#soup"]}`. Registration remains invite-only. The current server catalog starts with `irc.chonkbase.net:6697` over verified TLS; the owner can add approved networks in the NixOS module.
+The owner invites GitHub users with `POST /admin/invite`, `Authorization: Bearer <ADMIN_TOKEN>`, and JSON such as `{"github_login":"alice","channels":["#soup"]}`. An invitation grants permission but enables no channels; the user selects them in `/settings`. Registration remains invite-only. The current server catalog starts with `irc.chonkbase.net:6697` over verified TLS; the owner can add approved networks in the NixOS module.
 
 ## Checks
 

@@ -20,6 +20,12 @@ const config = { publicBaseUrl: base, githubClientId: "github-client", githubCli
   zncHost: "127.0.0.1", zncPort: 6667, zncUser: "zircon", zncNetwork: "chonkbase", zncPassword: "znc-secret",
   ircNick: "zircon", ircUsername: "zircon", ircRealname: "Zircon ChatGPT bridge" };
 
+function inviteWithChannels(store, login, channels = ["#soup"]) {
+  const invited = store.invite(login, channels, "chonkbase");
+  store.updateSettings(invited.id, invited.display_name, channels, "chonkbase", invited.nick);
+  return store.userById(invited.id);
+}
+
 test("requests without a Host header use the configured public URL", async () => {
   const handle = createHandler(config, {}, {}, async () => null);
   const request = path => ({ url: path, method: "GET", headers: new Headers() });
@@ -70,6 +76,7 @@ test("GitHub invite, consent, PKCE, API, refresh and revocation", async () => {
   try {
     expect((await req("/healthz")).status).toBe(200);
     expect((await req("/admin/invite", { method: "POST", headers: { Authorization: "Bearer admin-secret", "Content-Type": "application/json" }, body: JSON.stringify({ github_login: "alice", channels: ["#soup"] }) })).status).toBe(201);
+    expect(JSON.parse(store.userByLogin("alice").selected_channels)).toEqual([]);
     const verifier = "a".repeat(43);
     const challenge = createHash("sha256").update(verifier).digest("base64url");
     const authorize = `/oauth/authorize?${new URLSearchParams({ response_type: "code", client_id: config.oauthClientId, redirect_uri: callback, state: "state-1", scope: "irc:read irc:write", code_challenge: challenge, code_challenge_method: "S256" })}`;
@@ -97,12 +104,14 @@ test("GitHub invite, consent, PKCE, API, refresh and revocation", async () => {
     const settings = { display_name: "Alice", network_name: "chonkbase", nick: "Alice", channel: "#soup" };
     const settingsPage = await req("/settings", { headers: { Cookie: cookie } });
     expect(settingsPage.headers.get("Referrer-Policy")).toBe("same-origin");
+    expect(await settingsPage.text()).toContain('value="#soup" >');
     expect((await req("/settings", form({ csrf: "bad", ...settings }, cookie))).status).toBe(403);
     expect((await req("/settings", form({ csrf, ...settings, channel: "#other" }, cookie))).status).toBe(400);
     expect((await req("/settings", { ...form({ csrf, ...settings }, cookie), headers: {
       ...form({ csrf, ...settings }, cookie).headers, Origin: "null", "Sec-Fetch-Site": "cross-site" } })).status).toBe(403);
     expect((await req("/settings", { ...form({ csrf, ...settings }, cookie), headers: {
       ...form({ csrf, ...settings }, cookie).headers, Origin: "null", "Sec-Fetch-Site": "same-origin" } })).status).toBe(303);
+    expect(JSON.parse(store.userByLogin("alice").selected_channels)).toEqual(["#soup"]);
     expect((await req("/oauth/authorize/approve", form({ csrf: "bad", request_id: requestId, decision: "approve" }, cookie))).status).toBe(403);
     const consentForm = form({ csrf, request_id: requestId, decision: "approve" }, cookie);
     const approved = await req("/oauth/authorize/approve", { ...consentForm, headers: {
@@ -172,7 +181,7 @@ test("MCP discovery, OAuth, history, posting and presence tools", async () => {
     expect((await req("/oauth/token", { method: "POST", headers: {
       "Content-Type": "application/x-www-form-urlencoded", Authorization: basicHeader },
       body: new URLSearchParams({ grant_type: "test", resource: base }) })).status).toBe(400);
-    const user = store.invite("alice", ["#soup"], "chonkbase");
+    const user = inviteWithChannels(store, "alice");
     const irc = new IrcClient({ ...config, ircChannels: ["#soup"], ircNick: "alice", networkName: "chonkbase",
       onActivity: event => store.recordActivity(user, event) });
     irc.onLine("@time=2026-10-01T00:00:00.000Z :bob!u@h JOIN #soup");
@@ -272,7 +281,7 @@ test("MCP discovery, OAuth, history, posting and presence tools", async () => {
     expect(status.upstreamConnected).toBeNull();
     expect(status.lastReceived.entryId).toBe(echoed.entryId);
     expect(status.channels[0].lastAcknowledged.entryId).toBe(unread.entries.at(-1).entryId);
-    expect(status.version).toBe("0.7.0");
+    expect(status.version).toBe("0.7.1");
     const lastHour = (await (await mcp("tools/call", { name: "read_history", arguments: { channel: "#soup", mode: "last_hour" } })).json()).result.structuredContent;
     expect(lastHour.entries.some(item => item.entryId === echoed.entryId)).toBe(true);
     expect((await (await mcp("tools/call", { name: "send_message", arguments: outgoing })).json()).result.structuredContent.status).toBe("echoed");
@@ -294,8 +303,8 @@ test("owner diagnostics show bounded IRC activity and MCP calls without exposing
   const diagnosticConfig = { ...config, diagnosticsEnabled: true, diagnosticsAdminLogins: ["alice"] };
   const store = new Store(":memory:", diagnosticConfig);
   try {
-    const alice = store.invite("alice", ["#soup"], "chonkbase");
-    const bob = store.invite("bob", ["#soup"], "chonkbase");
+    const alice = inviteWithChannels(store, "alice");
+    const bob = inviteWithChannels(store, "bob");
     const time = new Date().toISOString();
     store.recordActivity(alice, { channel: "#soup", kind: "message", time, observedAt: time,
       timestampSource: "server", nick: "chickenbot", text: "a soup joke" });
@@ -326,8 +335,8 @@ test("owner diagnostics show bounded IRC activity and MCP calls without exposing
 test("one ZNC account and network are provisioned per invited user", () => {
   const store = new Store(":memory:");
   try {
-    const alice = store.invite("alice", ["#soup"], "chonkbase");
-    const bob = store.invite("bob", ["#soup"], "chonkbase");
+    const alice = inviteWithChannels(store, "alice");
+    const bob = inviteWithChannels(store, "bob");
     expect(alice.znc_username).not.toBe(bob.znc_username);
     expect(userPassword(config, alice)).not.toBe(userPassword(config, bob));
     const commands = provisioningCommands(config, alice).map(item => item.command);
@@ -341,10 +350,63 @@ test("one ZNC account and network are provisioned per invited user", () => {
   } finally { store.close(); }
 });
 
+test("channel opt-in and opt-out reprovision ZNC on settings save", async () => {
+  const store = new Store(":memory:");
+  try {
+    const invited = store.invite("alice", ["#soup"], "chonkbase");
+    expect(JSON.parse(invited.selected_channels)).toEqual([]);
+    const commands = [];
+    const provisioner = new ZncProvisioner(config, store, async (_config, batch) => {
+      commands.push(batch.map(item => item.command));
+    });
+    const pool = new IrcPool(config, store, provisioner);
+    pool.forUser = async () => {};
+    const handle = createHandler(config, pool, store, async () => null);
+    const cookie = `__Host-zircon_session=${store.createSession(invited.id)}`;
+    const request = (method, body) => handle(new Request(`${base}/settings`, {
+      method, headers: { Cookie: cookie, Origin: base,
+        ...(body ? { "Content-Type": "application/x-www-form-urlencoded" } : {}) }, body,
+    }));
+    const csrf = (await (await request("GET")).text()).match(/name="csrf" value="([^"]+)"/)[1];
+    const fields = channel => new URLSearchParams({ csrf, display_name: "alice",
+      network_name: "chonkbase", nick: "alice", ...(channel ? { channel } : {}) });
+    expect((await request("POST", fields("#soup"))).status).toBe(303);
+    expect(JSON.parse(store.userById(invited.id).selected_channels)).toEqual(["#soup"]);
+    expect(commands.at(-1)).toContain(`AddChan ${invited.znc_username} primary #soup`);
+    const version = store.userById(invited.id).config_version;
+    const commandCount = commands.length;
+    const expanded = await handle(new Request(`${base}/admin/invite`, { method: "POST", headers: {
+      Authorization: "Bearer admin-secret", "Content-Type": "application/json" },
+    body: JSON.stringify({ github_login: "alice", channels: ["#soup", "#other"] }) }));
+    expect(expanded.status).toBe(201);
+    expect(JSON.parse(store.userById(invited.id).selected_channels)).toEqual(["#soup"]);
+    expect(store.userById(invited.id).config_version).toBe(version);
+    expect(commands).toHaveLength(commandCount);
+    const stamp = new Date().toISOString();
+    store.recordActivity(store.userById(invited.id), { channel: "#soup", kind: "message", time: stamp,
+      observedAt: stamp, timestampSource: "server", nick: "bob", text: "before opt out" });
+    expect((await request("POST", fields(null))).status).toBe(303);
+    expect(JSON.parse(store.userById(invited.id).selected_channels)).toEqual([]);
+    expect(commands.at(-1).some(command => command.startsWith("AddChan"))).toBe(false);
+    expect(store.recentActivity(store.userById(invited.id), "#soup", 10)).toHaveLength(1);
+    const token = store.issueTokens(invited.id, "test-client", "irc:read", base).access_token;
+    const blocked = await handle(new Request(`${base}/mcp`, { method: "POST", headers: {
+      Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call", params: {
+      name: "read_history", arguments: { channel: "#soup", mode: "recent" } } }) }));
+    expect((await blocked.json()).error.code).toBe(-32602);
+    const grant = store.invite("alice", ["#soup", "#other"], "chonkbase");
+    expect(JSON.parse(grant.selected_channels)).toEqual([]);
+    store.updateSettings(grant.id, "alice", ["#other"], "chonkbase", "alice");
+    expect(JSON.parse(store.invite("alice", ["#soup", "#other"], "chonkbase").selected_channels)).toEqual(["#other"]);
+    expect(JSON.parse(store.invite("alice", ["#soup"], "chonkbase").selected_channels)).toEqual([]);
+  } finally { store.close(); }
+});
+
 test("existing ZNC users gain persistent buffers without rebuilding their network", async () => {
   const store = new Store(":memory:");
   try {
-    const user = store.invite("alice", ["#soup"], "chonkbase");
+    const user = inviteWithChannels(store, "alice");
     store.markProvisioned(user.id, user.config_version);
     store.db.query("UPDATE users SET buffer_policy = 0 WHERE id = ?").run(user.id);
     const seen = [];
@@ -382,8 +444,8 @@ test("channel history survives restart, enforces user scope and retention, and p
   let alice;
   let bob;
   try {
-    alice = store.invite("alice", ["#soup"], "chonkbase");
-    bob = store.invite("bob", ["#soup"], "chonkbase");
+    alice = inviteWithChannels(store, "alice");
+    bob = inviteWithChannels(store, "bob");
     const time = new Date().toISOString();
     store.recordActivity(alice, { channel: "#soup", kind: "message", time, observedAt: time,
       timestampSource: "server", nick: "someone", text: "hello alice" });
@@ -406,7 +468,7 @@ test("unread batches survive restart, isolate OAuth clients, and drain overflow 
   const dir = mkdtempSync(join(tmpdir(), "zircon-mailbox-"));
   const path = join(dir, "zircon.sqlite");
   let store = new Store(path);
-  const user = store.invite("alice", ["#soup"], "chonkbase");
+  const user = inviteWithChannels(store, "alice");
   for (let index = 0; index < 5; index++) {
     const time = new Date(Date.now() + index).toISOString();
     store.recordActivity(user, { channel: "#soup", kind: "message", time, observedAt: time,
@@ -452,7 +514,7 @@ test("MCP mention subscriptions verify callbacks, persist, filter, sign and unsu
       { status: 204, body: "" };
   };
   const events = new EventService(store, transport);
-  const user = store.invite("alice", ["#soup"], "chonkbase");
+  const user = inviteWithChannels(store, "alice");
   const token = store.issueTokens(user.id, "agent-a", "irc:read", base).access_token;
   let handle = createHandler(config, {}, store, async () => null, events);
   const rpc = (method, params = {}) => handle(new Request(`${base}/mcp`, { method: "POST",
@@ -522,7 +584,7 @@ test("MCP mention subscriptions verify callbacks, persist, filter, sign and unsu
 
 test("event worker retries transient failures with one ID and drops a gone subscription", async () => {
   const store = new Store(":memory:");
-  const user = store.invite("alice", ["#soup"], "chonkbase");
+  const user = inviteWithChannels(store, "alice");
   const secret = `whsec_${randomBytes(32).toString("base64")}`;
   const id = store.saveEventSubscription(user, "agent-a", "message.mention", { channel: "#soup" },
     "https://hooks.example.com/callback", secret, null);
@@ -579,7 +641,7 @@ test("HTTPS callback lookup satisfies Bun's all-address request", async () => {
 test("failed sends keep their identity and can be retried without changing the message ID", () => {
   const store = new Store(":memory:");
   try {
-    const user = store.invite("alice", ["#soup"], "chonkbase");
+    const user = inviteWithChannels(store, "alice");
     const key = "retry-send-123";
     const messageId = store.outgoingMessageId(user, key);
     expect(store.reservePost(user, key, "#soup", "hello")).toBe("new");
@@ -599,7 +661,7 @@ test("startup backfills stable IDs in retained activity and pending unread batch
   const path = join(dir, "zircon.sqlite");
   let store = new Store(path);
   try {
-    const user = store.invite("alice", ["#soup"], "chonkbase");
+    const user = inviteWithChannels(store, "alice");
     const time = new Date().toISOString();
     store.recordActivity(user, { channel: "#soup", kind: "message", time, observedAt: time,
       timestampSource: "server", nick: "bob", text: "alice: hello" });
@@ -623,7 +685,7 @@ test("agent mailboxes survive restart and acknowledge independently under one OA
   const path = join(dir, "zircon.sqlite");
   let store = new Store(path);
   try {
-    const user = store.invite("alice", ["#soup"], "chonkbase");
+    const user = inviteWithChannels(store, "alice");
     const first = store.startAgentSession(user, "shared-client");
     const second = store.startAgentSession(user, "shared-client");
     const stamp = new Date().toISOString();

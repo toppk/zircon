@@ -297,7 +297,7 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
         <label>IRC network <select name="network_name">${networks}</select></label>
         <label>IRC nick <input name="nick" maxlength="31" value="${escapeHtml(user.nick)}" required></label>
         <label>IRC display name <input name="display_name" maxlength="32" value="${escapeHtml(user.display_name)}" required></label>
-        <fieldset><legend>Channels enabled in ChatGPT</legend>${options}</fieldset><button>Save</button></form>
+        <fieldset><legend>Channels enabled in ChatGPT</legend><p>New channels start off. Select a granted channel to join it and let ChatGPT read and post there.</p>${options}</fieldset><button>Save</button></form>
         <h2>Event subscriptions</h2><p>ChatGPT can receive new mentions while IRC is online. Revoking a subscription stops future deliveries.</p><ul>${subscriptions || "<li>No active subscriptions</li>"}</ul>`);
     }
     if (path === "/settings/subscriptions/revoke" && request.method === "POST") {
@@ -355,8 +355,18 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
       if (!/^[a-z0-9-]{1,39}$/.test(login) || !Array.isArray(channels) || !channels.length ||
           channels.some(channel => !config.ircChannels.includes(channel))) return json({ error: "Invalid invite" }, 400);
       if (!store.userByLogin(login) && store.userCount() >= (config.maxUsers ?? 16)) return json({ error: "User limit reached" }, 409);
+      const previous = store.userByLogin(login);
       const user = store.invite(login, [...new Set(channels)], config.ircNetworks[0].name);
-      pool.drop(user.id);
+      if (previous && previous.selected_channels !== user.selected_channels) {
+        pool.drop(user.id);
+        if (user.online) {
+          try { await pool.forUser(user); }
+          catch (error) {
+            console.error("Could not apply updated channel grant:", error.message);
+            return json({ error: "Invitation saved, but IRC setup is pending" }, 503);
+          }
+        }
+      }
       return json({ github_login: user.github_login, allowed_channels: JSON.parse(user.allowed_channels) }, 201);
     }
 
