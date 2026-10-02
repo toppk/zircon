@@ -17,6 +17,13 @@ const config = { publicBaseUrl: base, githubClientId: "github-client", githubCli
   zncHost: "127.0.0.1", zncPort: 6667, zncUser: "zircon", zncNetwork: "chonkbase", zncPassword: "znc-secret",
   ircNick: "zircon", ircUsername: "zircon", ircRealname: "Zircon" };
 
+test("requests without a Host header use the configured public URL", async () => {
+  const handle = createHandler(config, {}, {}, async () => null);
+  const request = path => ({ url: path, method: "GET", headers: new Headers() });
+  expect((await handle(request("/healthz"))).status).toBe(200);
+  expect((await handle(request("/privacy"))).status).toBe(200);
+});
+
 test("IRC parser and stream handle replay and split UTF-8", () => {
   expect(parseIrcLine(":alice!u@h PRIVMSG #soup :hello there").params).toEqual(["#soup", "hello there"]);
   const irc = new IrcClient(config);

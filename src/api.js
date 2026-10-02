@@ -31,7 +31,7 @@ export function createHandler(config, pool, store, getGithubIdentity) {
   const web = createWebHandler(config, store, pool, getGithubIdentity);
   const schema = openApi(config);
   return async request => {
-    const url = new URL(request.url);
+    const url = new URL(request.url, config.publicBaseUrl);
     if (request.method === "GET" && url.pathname === "/healthz") return json({ ok: true });
     if (request.method === "GET" && url.pathname === "/openapi.json") return json(schema);
     const webResponse = await web(request);

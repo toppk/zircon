@@ -72,7 +72,7 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
   };
 
   return async request => {
-    const url = new URL(request.url);
+    const url = new URL(request.url, base);
     const path = url.pathname;
 
     if (path === "/privacy" && request.method === "GET") return page("Zircon privacy", `<p>Zircon uses GitHub to identify invited users. It stores your GitHub username and numeric ID, IRC settings, browser sessions, hashed OAuth tokens, and an audit of messages you send. It does not store your GitHub access token after sign-in.</p>
