@@ -286,11 +286,16 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
       if (!user) return redirect(`${base}/login`);
       const allowed = JSON.parse(user.allowed_channels);
       const selected = new Set(JSON.parse(user.selected_channels));
+      const enabledChannels = new Set([...selected].map(channel => channel.toLowerCase()));
       const options = allowed.map(channel => `<label><input type="checkbox" name="channel" value="${escapeHtml(channel)}" ${selected.has(channel) ? "checked" : ""}>${escapeHtml(channel)}</label>`).join("<br>");
       const networks = config.ircNetworks.map(network => `<option value="${escapeHtml(network.name)}" ${network.name === user.network_name ? "selected" : ""}>${escapeHtml(network.name)} (${escapeHtml(network.host)})</option>`).join("");
       const diagnosticsLink = config.diagnosticsEnabled && config.diagnosticsAdminLogins?.includes(user.github_login)
         ? '<p><a href="/admin/events">View recent diagnostics</a></p>' : "";
-      const subscriptions = store.listEventSubscriptions(user).map(subscription => `<li><strong>${escapeHtml(subscription.name)}</strong> ${escapeHtml(JSON.stringify(subscription.arguments))} to ${escapeHtml(new URL(subscription.url).origin)}${subscription.expiresAt ? ` until ${escapeHtml(subscription.expiresAt)}` : " (no expiry)"}
+      const subscriptions = store.listEventSubscriptions(user).map(subscription => `<li><strong>${escapeHtml(subscription.name)}</strong> ${escapeHtml(JSON.stringify(subscription.arguments))}${subscription.arguments.network && subscription.arguments.network !== user.network_name
+        ? " <em>(paused: network changed)</em>"
+        : subscription.arguments.channel
+          ? enabledChannels.has(subscription.arguments.channel.toLowerCase()) ? "" : " <em>(paused: channel disabled)</em>"
+          : enabledChannels.size ? " <em>(follows enabled channels)</em>" : " <em>(paused: no channels enabled)</em>"} to ${escapeHtml(new URL(subscription.url).origin)}${subscription.expiresAt ? ` until ${escapeHtml(subscription.expiresAt)}` : " (no expiry)"}
         <form method="post" action="/settings/subscriptions/revoke"><input type="hidden" name="csrf" value="${csrf(config, cookieValue(request))}"><input type="hidden" name="id" value="${escapeHtml(subscription.id)}"><button>Revoke</button></form></li>`).join("");
       return page("Zircon settings", `<p>GitHub: ${escapeHtml(user.github_login)}</p><p>IRC is ${user.online ? "online" : "offline"}. Staying online records new channel activity and delivers subscribed mention events. ChatGPT can use go_offline and go_online when you ask it to change your presence.</p>${diagnosticsLink}<form method="post" action="/settings">
         <input type="hidden" name="csrf" value="${csrf(config, cookieValue(request))}">
@@ -298,7 +303,7 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
         <label>IRC nick <input name="nick" maxlength="31" value="${escapeHtml(user.nick)}" required></label>
         <label>IRC display name <input name="display_name" maxlength="32" value="${escapeHtml(user.display_name)}" required></label>
         <fieldset><legend>Channels enabled in ChatGPT</legend><p>New channels start off. Select a granted channel to join it and let ChatGPT read and post there.</p>${options}</fieldset><button>Save</button></form>
-        <h2>Event subscriptions</h2><p>ChatGPT can receive new mentions while IRC is online. Revoking a subscription stops future deliveries.</p><ul>${subscriptions || "<li>No active subscriptions</li>"}</ul>`);
+        <h2>Event subscriptions</h2><p>ChatGPT can receive new mentions while IRC is online. A subscription filtered to one channel stays there when you change channels; one without a channel filter follows all channels you enable. Revoking a subscription stops future deliveries.</p><ul>${subscriptions || "<li>No active subscriptions</li>"}</ul>`);
     }
     if (path === "/settings/subscriptions/revoke" && request.method === "POST") {
       const user = sessionUser(request);

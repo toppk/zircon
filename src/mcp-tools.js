@@ -16,16 +16,20 @@ const lastAcknowledged = { ...object({ entryId: string, kind: string, time: stri
 const channelState = { ...object({ channel: string, unreadCount: { type: "integer" },
   lastAcknowledged: { anyOf: [lastAcknowledged, { type: "null" }] }, pendingBatchId: nullableString }),
   required: ["channel", "unreadCount", "lastAcknowledged", "pendingBatchId"] };
+const subscriptionState = { ...object({ filters: object({ network: string, channel: string,
+  sender: string, keyword: string }), paused: { type: "boolean" }, expiresAt: nullableString }),
+  required: ["filters", "paused", "expiresAt"] };
 const mentionState = { ...object({ scope: { type: "string", enum: ["oauth_client"] },
   state: { type: "string", enum: ["not_subscribed", "subscribed_idle", "delivery_pending", "delivery_accepted", "delivery_failed"] },
   activeSubscriptions: { type: "integer" }, pendingDeliveries: { type: "integer" },
+  subscriptions: { type: "array", items: subscriptionState },
   lastDeliveryAttemptAt: nullableString, lastDeliveryStatus: nullableString, nextStep: string }),
-  required: ["scope", "state", "activeSubscriptions", "pendingDeliveries", "lastDeliveryAttemptAt", "lastDeliveryStatus", "nextStep"] };
+  required: ["scope", "state", "activeSubscriptions", "pendingDeliveries", "subscriptions", "lastDeliveryAttemptAt", "lastDeliveryStatus", "nextStep"] };
 
 export const tools = [
   {
     name: "see_account_information", title: "See my IRC account and session",
-    description: "Start here. Show the configured IRC server, nick and channels, connection and online duration, last captured activity, this agent's unread counts and last acknowledged entries, and mention subscriptions for this OAuth client. On the first call omit session_id to create an independent agent mailbox; reuse the returned sessionId in this chat. Settings can be changed at settingsUrl. IRC presence is shared by all agents using this human account.",
+    description: "Start here. Show the configured IRC server, nick and channels, connection and online duration, last captured activity, this agent's unread counts and last acknowledged entries, and mention subscription filters for this OAuth client. Check those filters after changing enabled channels: a channel-specific subscription does not move to another channel. On the first call omit session_id to create an independent agent mailbox; reuse the returned sessionId in this chat. Settings can be changed at settingsUrl. IRC presence is shared by all agents using this human account.",
     inputSchema: object({ session_id: string }),
     outputSchema: { ...object({ version: string, sessionId: string, sessionCreatedAt: string,
       githubLogin: string, displayName: string, network: string, server: string, nick: string, settingsUrl: string,
@@ -123,12 +127,12 @@ export function summarizeEventState(event) {
       !event.lastEventAttemptAt ? "subscribed_idle" : accepted ? "delivery_accepted" : "delivery_failed";
   const nextStep = {
     not_subscribed: "No push delivery is active. In a supported ChatGPT Work chat, ask ChatGPT to monitor message.mention. ChatGPT must call MCP events/subscribe; ordinary Zircon tools cannot subscribe for it.",
-    subscribed_idle: "At least one subscription exists for this OAuth client; this chat may not own it. Send a matching message in the subscribed chat and inspect account information again.",
+    subscribed_idle: "At least one subscription exists for this OAuth client; this chat may not own it. Check subscriptions.paused and filters. A channel filter stays pinned, while omitting channel follows all enabled channels. Send a matching message in the subscribed chat and inspect account information again.",
     delivery_pending: "A matching event is queued for the background worker.",
     delivery_accepted: "The receiver accepted the last callback. ChatGPT processes events asynchronously; acceptance does not prove a chat response.",
     delivery_failed: "The last callback was not accepted. Check owner diagnostics and receiver availability.",
   }[state];
   return { scope: "oauth_client", state, activeSubscriptions: event.eventSubscriptionCount,
-    pendingDeliveries: event.pendingDeliveries, lastDeliveryAttemptAt: event.lastEventAttemptAt,
+    subscriptions: event.subscriptions, pendingDeliveries: event.pendingDeliveries, lastDeliveryAttemptAt: event.lastEventAttemptAt,
     lastDeliveryStatus: event.lastEventDeliveryStatus, nextStep };
 }

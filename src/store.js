@@ -570,17 +570,28 @@ export class Store {
   }
 
   clientEventStatus(user, clientId) {
-    const subscriptions = this.db.query(`SELECT count(*) AS count,max(last_attempt_at) AS lastAttemptAt
+    const summary = this.db.query(`SELECT count(*) AS count,max(last_attempt_at) AS lastAttemptAt
       FROM event_subscriptions WHERE user_id=? AND client_id=? AND active=1 AND (expires_at IS NULL OR expires_at>?)`)
       .get(user.id, clientId, now());
+    const enabledChannels = new Set(JSON.parse(user.selected_channels).map(channel => channel.toLowerCase()));
+    const subscriptions = this.db.query(`SELECT arguments,expires_at AS expiresAt FROM event_subscriptions
+      WHERE user_id=? AND client_id=? AND name='message.mention' AND active=1
+      AND (expires_at IS NULL OR expires_at>?) ORDER BY created_at DESC`)
+      .all(user.id, clientId, now()).map(row => {
+        const filters = JSON.parse(row.arguments);
+        return { filters, paused: enabledChannels.size === 0 ||
+          (filters.network !== undefined && filters.network !== user.network_name) ||
+          (filters.channel !== undefined && !enabledChannels.has(filters.channel.toLowerCase())),
+        expiresAt: row.expiresAt === null ? null : new Date(row.expiresAt).toISOString() };
+      });
     const lastDelivery = this.db.query(`SELECT last_delivery_status AS status FROM event_subscriptions
       WHERE user_id=? AND client_id=? AND active=1 AND last_attempt_at IS NOT NULL
       ORDER BY last_attempt_at DESC LIMIT 1`).get(user.id, clientId);
     const pending = this.db.query(`SELECT count(*) AS count FROM event_deliveries d
       JOIN event_subscriptions s ON s.id=d.subscription_id WHERE s.user_id=? AND s.client_id=?`)
       .get(user.id, clientId).count;
-    return { eventSubscriptionCount: subscriptions.count, pendingDeliveries: pending,
-      lastEventAttemptAt: subscriptions.lastAttemptAt === null ? null : new Date(subscriptions.lastAttemptAt).toISOString(),
+    return { eventSubscriptionCount: summary.count, subscriptions, pendingDeliveries: pending,
+      lastEventAttemptAt: summary.lastAttemptAt === null ? null : new Date(summary.lastAttemptAt).toISOString(),
       lastEventDeliveryStatus: lastDelivery?.status ?? null };
   }
 
@@ -603,7 +614,8 @@ export class Store {
 
   removeEventSubscription(user, clientId, name, args, url) {
     const id = this.eventSubscriptionId(user, clientId, name, args, url);
-    this.db.query("DELETE FROM event_deliveries WHERE subscription_id=?").run(id);
+    this.db.query(`DELETE FROM event_deliveries WHERE subscription_id IN
+      (SELECT id FROM event_subscriptions WHERE id=? AND user_id=? AND client_id=?)`).run(id, user.id, clientId);
     this.db.query("DELETE FROM event_subscriptions WHERE id=? AND user_id=? AND client_id=?").run(id, user.id, clientId);
     this.recordDiagnostic(user, "event", "unsubscribe", id);
   }

@@ -45,7 +45,7 @@ export function createMcpHandler(config, store, pool, events) {
     if (call.method === "events/list") {
       if (!readPrincipal) return response({ error: "Unauthorized" }, 401, { "WWW-Authenticate": challenge("irc:read") });
       return result(call.id, { events: [{
-        name: "message.mention", description: "A message in a joined IRC channel addresses your current IRC nick. Zircon must stay online to deliver it.",
+        name: "message.mention", description: "A message addresses your current IRC nick. Omit channel to monitor all enabled channels, including channels enabled later in settings. A channel filter stays pinned to that channel. Zircon must stay online to deliver it.",
         delivery: ["webhook"],
         inputSchema: object({ network: string, channel: string, sender: string, keyword: string }),
         payloadSchema: { ...object({ network: string, channel: string, sender: string, text: string,
@@ -63,14 +63,16 @@ export function createMcpHandler(config, store, pool, events) {
       if (params.name !== "message.mention" || !filters || typeof filters !== "object" || Array.isArray(filters) ||
           Object.entries(filters).some(([key, value]) => !allowedFilter(key) || typeof value !== "string" ||
             !value || value.length > 100) ||
-          (filters.network && filters.network !== user.network_name) ||
-          (filters.channel && !selected.some(channel => channel.toLowerCase() === filters.channel.toLowerCase())) ||
           delivery.mode !== "webhook" || !validCallbackUrl(delivery.url)) {
         return error(call.id, -32602, "Invalid event, filters, or callback URL");
       }
       if (call.method === "events/unsubscribe") {
         store.removeEventSubscription(user, readPrincipal.clientId, params.name, filters, delivery.url);
         return result(call.id, {});
+      }
+      if ((filters.network && filters.network !== user.network_name) ||
+          (filters.channel && !selected.some(channel => channel.toLowerCase() === filters.channel.toLowerCase()))) {
+        return error(call.id, -32602, "Event channel or network is not enabled");
       }
       const ttl = params.ttlMs === undefined ? 86_400_000 : params.ttlMs;
       if ((ttl !== null && (!Number.isInteger(ttl) || ttl < 0)) ||

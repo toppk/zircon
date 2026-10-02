@@ -281,7 +281,7 @@ test("MCP discovery, OAuth, history, posting and presence tools", async () => {
     expect(status.upstreamConnected).toBeNull();
     expect(status.lastReceived.entryId).toBe(echoed.entryId);
     expect(status.channels[0].lastAcknowledged.entryId).toBe(unread.entries.at(-1).entryId);
-    expect(status.version).toBe("0.7.2");
+    expect(status.version).toBe("0.7.3");
     const lastHour = (await (await mcp("tools/call", { name: "read_history", arguments: { channel: "#soup", mode: "last_hour" } })).json()).result.structuredContent;
     expect(lastHour.entries.some(item => item.entryId === echoed.entryId)).toBe(true);
     expect((await (await mcp("tools/call", { name: "send_message", arguments: outgoing })).json()).result.structuredContent.status).toBe("echoed");
@@ -537,7 +537,9 @@ test("MCP mention subscriptions verify callbacks, persist, filter, sign and unsu
       delivery, ttlMs: null })).result;
     expect(subscribed.refreshBefore).toBeNull();
     expect(subscribed.id).toStartWith("sub_");
-    expect((await diagnostic()).result.structuredContent.mentionEvents.state).toBe("subscribed_idle");
+    const initialEvents = (await diagnostic()).result.structuredContent.mentionEvents;
+    expect(initialEvents.state).toBe("subscribed_idle");
+    expect(initialEvents.subscriptions).toEqual([{ filters: args, paused: false, expiresAt: null }]);
     expect(deliveries[0].headers["webhook-signature"]).toBe(webhookSignature(secret,
       deliveries[0].headers["webhook-id"], deliveries[0].headers["webhook-timestamp"], deliveries[0].body));
     const time = new Date().toISOString();
@@ -564,9 +566,21 @@ test("MCP mention subscriptions verify callbacks, persist, filter, sign and unsu
     expect(deliveries.at(-1).headers["webhook-id"]).toBe(sent.eventId);
     expect(store.db.query("SELECT count(*) AS count FROM event_deliveries").get().count).toBe(0);
     expect((await diagnostic()).result.structuredContent.mentionEvents.state).toBe("delivery_accepted");
+    store.updateSettings(user.id, user.display_name, [], user.network_name, user.nick);
+    expect((await diagnostic()).result.structuredContent.mentionEvents.subscriptions[0].filters).toEqual(args);
+    expect((await diagnostic()).result.structuredContent.mentionEvents.subscriptions[0].paused).toBe(true);
+    const pausedSession = store.createSession(user.id);
+    const pausedSettings = await handle(new Request(`${base}/settings`, {
+      headers: { Cookie: `__Host-zircon_session=${pausedSession}` } }));
+    expect(await pausedSettings.text()).toContain("paused: channel disabled");
+    expect((await rpc("events/subscribe", { name: "message.mention", arguments: args,
+      delivery })).error.code).toBe(-32602);
+    expect((await rpc("events/unsubscribe", { name: "message.mention", arguments: args,
+      delivery: { mode: "webhook", url: callbackUrl } })).result).toEqual({});
     expect((await rpc("events/unsubscribe", { name: "message.mention", arguments: args,
       delivery: { mode: "webhook", url: callbackUrl } })).result).toEqual({});
     expect(store.listEventSubscriptions(store.userById(user.id))).toHaveLength(0);
+    store.updateSettings(user.id, user.display_name, ["#soup"], user.network_name, user.nick);
     await rpc("events/subscribe", { name: "message.mention", arguments: args, delivery });
     const session = store.createSession(user.id);
     const cookie = `__Host-zircon_session=${session}`;
@@ -618,6 +632,33 @@ test("event worker retries transient failures with one ID and drops a gone subsc
     store.revokeToken(authorization.access_token, "agent-a");
     store.revokeToken(authorization.refresh_token, "agent-a");
     expect(store.hasEventAccess(user.id, "agent-a")).toBe(false);
+  } finally { store.close(); }
+});
+
+test("an unfiltered mention subscription follows enabled channel changes", () => {
+  const store = new Store(":memory:");
+  try {
+    const user = inviteWithChannels(store, "alice", ["#soup", "#other"]);
+    store.updateSettings(user.id, user.display_name, ["#soup"], user.network_name, user.nick);
+    store.saveEventSubscription(user, "agent-a", "message.mention", {},
+      "https://hooks.example.com/callback", `whsec_${randomBytes(32).toString("base64")}`, null);
+    store.issueTokens(user.id, "agent-a", "irc:read", base);
+    const mention = channel => {
+      const stamp = new Date(Date.now() + Math.random() * 1000).toISOString();
+      store.recordActivity(store.userById(user.id), { channel, kind: "message", time: stamp,
+        observedAt: stamp, timestampSource: "server", nick: "bob", text: "alice: hello" });
+    };
+    mention("#soup");
+    expect(store.db.query("SELECT count(*) AS count FROM event_deliveries").get().count).toBe(1);
+    store.updateSettings(user.id, user.display_name, ["#other"], user.network_name, user.nick);
+    mention("#other");
+    expect(store.db.query("SELECT count(*) AS count FROM event_deliveries").get().count).toBe(2);
+    mention("#soup");
+    expect(store.db.query("SELECT count(*) AS count FROM event_deliveries").get().count).toBe(2);
+    expect(store.clientEventStatus(store.userById(user.id), "agent-a").subscriptions[0].filters).toEqual({});
+    expect(store.clientEventStatus(store.userById(user.id), "agent-a").subscriptions[0].paused).toBe(false);
+    store.updateSettings(user.id, user.display_name, [], user.network_name, user.nick);
+    expect(store.clientEventStatus(store.userById(user.id), "agent-a").subscriptions[0].paused).toBe(true);
   } finally { store.close(); }
 });
 
