@@ -37,6 +37,8 @@ Seed the `zirconctl` account with `Admin = true`, `LoadModule = [ "controlpanel"
 
 Zircon derives each user's ZNC password using HMAC-SHA256 from the host-only `ZNC_USER_SECRET` and the stable Zircon user ID. Never rotate that secret without a migration: old ZNC account passwords would no longer match. ZNC stores the accounts and upstream buffers under `/var/lib/znc`, so add that directory to backups too. Zircon's own database is in `/var/lib/zircon` and must also be backed up. Zircon writes a verified, consistent SQLite copy to `/var/lib/zircon/backup/zircon.sqlite` on startup and every 24 hours for live-disk snapshot services. Restore both ZNC and Zircon state from the same backup point; if the raw SQLite files are inconsistent, use the copy.
 
+Provisioning sets each ZNC user's IRC real name to `Zircon ChatGPT bridge for <github_login>` by default, then asks ZNC to reconnect that user's network so the upstream IRC server sees it. `settings.ircRealname` controls the prefix.
+
 ## Zircon configuration
 
 The NixOS module `services.zircon` uses `DynamicUser`, a private state directory, hardened systemd settings, stdout logging, and an environment file outside the Nix store. Supply `environmentFile = "/var/lib/zircon-secrets/zircon.env"`. Put these **names** in that file: `GITHUB_CLIENT_SECRET`, `OAUTH_CLIENT_SECRET`, `SESSION_SECRET`, `ADMIN_TOKEN`, `ZNC_ADMIN_PASSWORD`, `ZNC_USER_SECRET`. GitHub issues `GITHUB_CLIENT_SECRET`; generate the others on ne2. The old `ZNC_PASSWORD` may stay there for the existing ZNC account; Zircon does not read it.

@@ -15,7 +15,7 @@ const config = { publicBaseUrl: base, githubClientId: "github-client", githubCli
   oauthRedirectUris: [callback], sessionSecret: "session-secret", adminToken: "admin-secret", ircChannels: ["#soup", "#other"],
   ircNetworks: [{ name: "chonkbase", host: "irc.chonkbase.net", port: 6697, tls: true }], zncUserSecret: "u".repeat(32),
   zncHost: "127.0.0.1", zncPort: 6667, zncUser: "zircon", zncNetwork: "chonkbase", zncPassword: "znc-secret",
-  ircNick: "zircon", ircUsername: "zircon", ircRealname: "Zircon" };
+  ircNick: "zircon", ircUsername: "zircon", ircRealname: "Zircon ChatGPT bridge" };
 
 test("requests without a Host header use the configured public URL", async () => {
   const handle = createHandler(config, {}, {}, async () => null);
@@ -75,13 +75,21 @@ test("GitHub invite, consent, PKCE, API, refresh and revocation", async () => {
     const cookie = signedIn.headers.get("set-cookie").split(";")[0];
     expect((await req(`/login/github/callback?state=${githubState}&code=sample`)).status).toBe(200);
     const consent = await req(`/oauth/authorize?request_id=${requestId}`, { headers: { Cookie: cookie } });
+    expect(consent.headers.get("Referrer-Policy")).toBe("same-origin");
     const csrf = (await consent.text()).match(/name="csrf" value="([^"]+)"/)[1];
     const settings = { display_name: "Alice", network_name: "chonkbase", nick: "Alice", channel: "#soup" };
+    const settingsPage = await req("/settings", { headers: { Cookie: cookie } });
+    expect(settingsPage.headers.get("Referrer-Policy")).toBe("same-origin");
     expect((await req("/settings", form({ csrf: "bad", ...settings }, cookie))).status).toBe(403);
     expect((await req("/settings", form({ csrf, ...settings, channel: "#other" }, cookie))).status).toBe(400);
-    expect((await req("/settings", form({ csrf, ...settings }, cookie))).status).toBe(303);
+    expect((await req("/settings", { ...form({ csrf, ...settings }, cookie), headers: {
+      ...form({ csrf, ...settings }, cookie).headers, Origin: "null", "Sec-Fetch-Site": "cross-site" } })).status).toBe(403);
+    expect((await req("/settings", { ...form({ csrf, ...settings }, cookie), headers: {
+      ...form({ csrf, ...settings }, cookie).headers, Origin: "null", "Sec-Fetch-Site": "same-origin" } })).status).toBe(303);
     expect((await req("/oauth/authorize/approve", form({ csrf: "bad", request_id: requestId, decision: "approve" }, cookie))).status).toBe(403);
-    const approved = await req("/oauth/authorize/approve", form({ csrf, request_id: requestId, decision: "approve" }, cookie));
+    const consentForm = form({ csrf, request_id: requestId, decision: "approve" }, cookie);
+    const approved = await req("/oauth/authorize/approve", { ...consentForm, headers: {
+      ...consentForm.headers, Origin: "null", "Sec-Fetch-Site": "same-origin" } });
     const callbackUrl = new URL(approved.headers.get("location"));
     expect(callbackUrl.searchParams.get("state")).toBe("state-1");
     const code = callbackUrl.searchParams.get("code");
@@ -116,6 +124,8 @@ test("MCP discovery, dynamic client registration, PKCE, resource binding and rea
   const post = (path, fields) => req(path, { method: "POST", headers: { "Content-Type": "application/x-www-form-urlencoded" }, body: new URLSearchParams(fields) });
   try {
     const metadata = await (await req("/.well-known/oauth-authorization-server")).json();
+    const resourceMetadata = await (await req("/.well-known/oauth-protected-resource")).json();
+    expect(resourceMetadata.resource_documentation).toBe("https://toppk.github.io/zircon/api.html");
     expect(metadata.code_challenge_methods_supported).toEqual(["S256"]);
     expect(metadata.registration_endpoint).toBe(`${base}/oauth/register`);
     expect((await req("/mcp")).headers.get("WWW-Authenticate")).toContain("oauth-protected-resource");
@@ -186,7 +196,9 @@ test("one ZNC account and network are provisioned per invited user", () => {
     expect(userPassword(config, alice)).not.toBe(userPassword(config, bob));
     const commands = provisioningCommands(config, alice).map(item => item.command);
     expect(commands).toContain(`AddServer ${alice.znc_username} primary irc.chonkbase.net +6697`);
+    expect(commands).toContain(`Set RealName ${alice.znc_username} Zircon ChatGPT bridge for alice`);
     expect(commands).toContain(`SetNetwork nick ${alice.znc_username} primary alice`);
+    expect(commands).toContain(`Reconnect ${alice.znc_username} primary`);
     expect(commands.at(-1)).toBe("SaveConfig");
   } finally { store.close(); }
 });
@@ -217,9 +229,10 @@ test("ZNC controlpanel provisions dynamically over one IRC listener", async () =
         if (!line.startsWith("PRIVMSG ")) continue;
         seen.push(line);
         const command = line.split(" :")[1].split(" ")[0];
-        const replies = { AddUser: "User ztest added!", DelNetwork: "Error: User ztest does not have a network named [primary].",
+        const replies = { AddUser: "User ztest added!", Set: "RealName = Zircon ChatGPT bridge for test", DelNetwork: "Error: User ztest does not have a network named [primary].",
           AddNetwork: "Network primary added to user ztest.", AddServer: "Added IRC Server irc.chonkbase.net +6697 to network primary for user ztest.",
-          SetNetwork: "Nick = test", AddChan: "Channel #soup for user ztest added to network primary.", SaveConfig: "Wrote config to /var/lib/znc/configs/znc.conf" };
+          SetNetwork: "Nick = test", AddChan: "Channel #soup for user ztest added to network primary.",
+          Reconnect: "Queued network primary of user ztest for a reconnect.", SaveConfig: "Wrote config to /var/lib/znc/configs/znc.conf" };
         const source = command === "SaveConfig" ? "*status" : "*controlpanel";
         socket.write(`:${source}!x@znc.in PRIVMSG zirconctl :${replies[command]}\r\n`);
       }
@@ -228,7 +241,7 @@ test("ZNC controlpanel provisions dynamically over one IRC listener", async () =
   await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
   try {
     const testConfig = { ...config, zncPort: server.address().port, zncAdminUser: "zirconctl", zncAdminPassword: "secret" };
-    const commands = provisioningCommands(testConfig, { id: "user-id", znc_username: "ztest", nick: "test", network_name: "chonkbase", selected_channels: '["#soup"]' });
+    const commands = provisioningCommands(testConfig, { id: "user-id", github_login: "test", znc_username: "ztest", nick: "test", network_name: "chonkbase", selected_channels: '["#soup"]' });
     await runZncCommands(testConfig, commands);
     expect(seen).toHaveLength(commands.length);
     expect(seen.at(-1)).toBe("PRIVMSG *status :SaveConfig");

@@ -34,7 +34,7 @@ services.zircon = {
 | `settings.zncAdminUser` | `zirconctl` | ZNC administrator with `controlpanel` |
 | `settings.ircNetworks` | `chonkbase`, `irc.chonkbase.net:6697`, TLS | owner-approved servers users may pick |
 | `settings.ircUsername` | `zircon` | IRC username (ident) |
-| `settings.ircRealname` | `Zircon ChatGPT bridge` | IRC real name |
+| `settings.ircRealname` | `Zircon ChatGPT bridge` | prefix for each user's IRC real name; their GitHub login is appended |
 | `settings.ircChannels` | required | channels the owner may grant |
 
 The service runs with `DynamicUser`, `StateDirectory=zircon`,

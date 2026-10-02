@@ -11,16 +11,21 @@ const safeWord = value => /^[A-Za-z0-9_#.-]{1,100}$/.test(value);
 export function provisioningCommands(config, user) {
   const network = config.ircNetworks.find(item => item.name === user.network_name);
   const channels = JSON.parse(user.selected_channels);
-  if (!network || !safeWord(user.znc_username) || !/^[A-Za-z][A-Za-z0-9_\-\[\]\\`^{}|]{0,30}$/.test(user.nick) ||
+  if (!network || !safeWord(user.znc_username) || !/^[a-z0-9-]{1,39}$/.test(user.github_login ?? "") ||
+      !/^[A-Za-z][A-Za-z0-9_\-\[\]\\`^{}|]{0,30}$/.test(user.nick) ||
       channels.some(channel => !/^#[^\s,\x00-\x1f]{1,100}$/.test(channel))) throw new Error("Invalid ZNC configuration");
   const name = user.znc_username;
+  const realName = `${config.ircRealname ?? "Zircon ChatGPT bridge"} for ${user.github_login}`;
+  if (/[\r\n\x00]/.test(realName)) throw new Error("Invalid ZNC real name");
   return [
     { target: "*controlpanel", command: `AddUser ${name} ${userPassword(config, user)}`, okay: /^(User .* added!|Error: User .* already exists!)$/ },
+    { target: "*controlpanel", command: `Set RealName ${name} ${realName}`, okay: /^RealName = / },
     { target: "*controlpanel", command: `DelNetwork ${name} primary`, okay: /^(Network primary deleted|Error: User .* does not have a network named \[primary\])/, },
     { target: "*controlpanel", command: `AddNetwork ${name} primary`, okay: /^Network primary added to user / },
     { target: "*controlpanel", command: `SetNetwork nick ${name} primary ${user.nick}`, okay: /^Nick = / },
     ...channels.map(channel => ({ target: "*controlpanel", command: `AddChan ${name} primary ${channel}`, okay: /^Channel .* added to network / })),
     { target: "*controlpanel", command: `AddServer ${name} primary ${network.host} +${network.port}`, okay: /^Added IRC Server / },
+    { target: "*controlpanel", command: `Reconnect ${name} primary`, okay: /^Queued network primary of user .* for a reconnect\.$/ },
     { target: "*status", command: "SaveConfig", okay: /^Wrote config to / },
   ];
 }

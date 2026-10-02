@@ -49,7 +49,8 @@ it without a migration.
 
 When a user saves `/settings`, or first uses the API, Zircon logs into ZNC
 as the administrator and uses `controlpanel` to create or update that
-user's account and network: server, nick and enabled channels.
+user's account and network: server, nick, real name (`Zircon ChatGPT bridge for <GitHub login>` by default) and enabled channels.
+Zircon reconnects that ZNC network so IRC sees a changed real name.
 It then runs `SaveConfig`. ZNC must run with `mutable = true` so that
 saved configuration survives a restart; [Deployment](deploy.html) covers
 the one-time migration.

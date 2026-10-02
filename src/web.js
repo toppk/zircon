@@ -23,7 +23,7 @@ function page(title, body) {
     headers: {
       "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
       "Content-Security-Policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
-      "X-Content-Type-Options": "nosniff", "Referrer-Policy": "no-referrer",
+      "X-Content-Type-Options": "nosniff", "Referrer-Policy": "same-origin",
     },
   });
 }
@@ -43,7 +43,8 @@ function equal(a, b) {
 }
 function sameOrigin(request, baseUrl) {
   const origin = request.headers.get("origin");
-  return !origin || origin === new URL(baseUrl).origin;
+  return origin === new URL(baseUrl).origin ||
+    (origin === "null" && request.headers.get("sec-fetch-site") === "same-origin");
 }
 function oauthError(error, status = 400) {
   return json({ error }, status);
@@ -95,7 +96,7 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
 
     if (path === "/.well-known/oauth-protected-resource" && request.method === "GET") return json({
       resource: base, authorization_servers: [base], scopes_supported: ["irc:read", "irc:write"],
-      resource_documentation: `${base}/`, resource_policy_uri: `${base}/privacy`,
+      resource_documentation: "https://toppk.github.io/zircon/api.html", resource_policy_uri: `${base}/privacy`,
     });
     if (path === "/.well-known/oauth-authorization-server" && request.method === "GET") return json({
       issuer: base, authorization_endpoint: `${base}/oauth/authorize`, token_endpoint: `${base}/oauth/token`,

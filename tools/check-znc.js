@@ -40,7 +40,7 @@ writeFileSync(join(dir, "configs", "znc.conf"), `Version = 1.10.1
 const child = Bun.spawn([binary, "--foreground", "--datadir", dir], { stdout: "pipe", stderr: "pipe" });
 const config = { zncHost: "127.0.0.1", zncPort: port, zncAdminUser: "zirconctl", zncAdminPassword: password,
   zncUserSecret: "u".repeat(32), ircNetworks: [{ name: "chonkbase", host: "irc.chonkbase.net", port: 6697, tls: true }] };
-const user = { id: "test-user", znc_username: "ztestuser", nick: "testnick", network_name: "chonkbase", selected_channels: '["#soup"]' };
+const user = { id: "test-user", github_login: "test-user", znc_username: "ztestuser", nick: "testnick", network_name: "chonkbase", selected_channels: '["#soup"]' };
 let ready = false;
 try {
   for (let i = 0; i < 50; i++) {
@@ -69,7 +69,7 @@ try {
   client.destroy();
   if (!welcome.includes("testnick")) throw new Error("Welcome did not name the configured nickname");
   const saved = readFileSync(join(dir, "configs", "znc.conf"), "utf8");
-  if (!saved.includes("<User ztestuser>") || !saved.includes("<Network primary>") || !saved.includes("irc.chonkbase.net") || !saved.includes("#soup")) throw new Error("ZNC config did not persist the user/network/channel");
+  if (!saved.includes("<User ztestuser>") || !saved.includes("<Network primary>") || !saved.includes("irc.chonkbase.net") || !saved.includes("#soup") || !saved.includes("RealName = Zircon ChatGPT bridge for test-user")) throw new Error("ZNC config did not persist the user/network/channel/real name");
   console.log("Real ZNC accepted and persisted a user, TLS network, nick and channel, then authenticated its IRC client without a restart.");
 } finally {
   child.kill("SIGINT");
