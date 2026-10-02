@@ -1,7 +1,7 @@
 { stdenvNoCC, makeWrapper, bun, self }:
 stdenvNoCC.mkDerivation {
   pname = "zircon";
-  version = "0.3.0";
+  version = "0.4.0";
   src = self;
   nativeBuildInputs = [ makeWrapper ];
   dontBuild = true;

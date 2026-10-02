@@ -45,10 +45,15 @@ Each dynamically registered redirect URI must exactly match one submitted at reg
 
 | tool | scope | result |
 |---|---|---|
-| `list_channels` | `irc:read` | The user's chosen network and enabled channels |
-| `get_channel_messages` | `irc:read` | Up to 200 recent buffered messages from one enabled channel |
+| `list_channels` | `irc:read` | The user's chosen network, enabled channels and online status |
+| `get_channel_messages` | `irc:read` | Up to 200 retained messages and channel events from one enabled channel |
+| `search_messages` | `irc:read` | Search retained messages, optionally by channel and UTC time |
+| `get_mentions` | `irc:read` | Return new mentions of the user's nick and mark them seen |
+| `send_message` | `irc:write` | Queue one message to an enabled channel; use an idempotency key for retries |
+| `go_offline` | `irc:write` | Disconnect the user's upstream IRC network |
+| `go_online` | `irc:write` | Reconnect the user's upstream IRC network |
 
-Messages come from the current per-user ZNC replay buffer. Persistent history, search, mentions and posting through MCP are planned before public directory submission.
+Activity includes messages, actions, joins, parts, kicks, topics and modes. Each entry has network and channel context, the sender's nick, event time, observation time, and a timestamp source (`server`, `observed` or `local`). History is scoped to the signed-in user and enabled channels. `send_message` returns **queued**, never a delivery guarantee. Staying online lets Zircon keep collecting messages for history and future Events.
 
 ## IRC endpoints
 
@@ -66,7 +71,7 @@ Scope `irc:read`. The user's ZNC connection and channels.
 
 ### `GET /v1/channels/{channel}/messages`
 
-Scope `irc:read`. Recent messages; `limit` is 1 to 200, default 50.
+Scope `irc:read`. Recent retained activity; `limit` is 1 to 200, default 50.
 
 ```sh
 curl -H "Authorization: Bearer $TOKEN" \

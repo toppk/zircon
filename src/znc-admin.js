@@ -8,6 +8,15 @@ export function userPassword(config, user) {
 
 const safeWord = value => /^[A-Za-z0-9_#.-]{1,100}$/.test(value);
 
+export function bufferPolicyCommands(user) {
+  if (!safeWord(user.znc_username)) throw new Error("Invalid ZNC user name");
+  return [
+    { target: "*controlpanel", command: `Set AutoClearChanBuffer ${user.znc_username} false`, okay: /^AutoClearChanBuffer = (false|0)$/i },
+    { target: "*controlpanel", command: `Set ChanBufferSize ${user.znc_username} 500`, okay: /^ChanBufferSize = 500$/ },
+    { target: "*status", command: "SaveConfig", okay: /^Wrote config to / },
+  ];
+}
+
 export function provisioningCommands(config, user) {
   const network = config.ircNetworks.find(item => item.name === user.network_name);
   const channels = JSON.parse(user.selected_channels);
@@ -20,12 +29,15 @@ export function provisioningCommands(config, user) {
   return [
     { target: "*controlpanel", command: `AddUser ${name} ${userPassword(config, user)}`, okay: /^(User .* added!|Error: User .* already exists!)$/ },
     { target: "*controlpanel", command: `Set RealName ${name} ${realName}`, okay: /^RealName = / },
+    ...bufferPolicyCommands(user).slice(0, -1),
     { target: "*controlpanel", command: `DelNetwork ${name} primary`, okay: /^(Network primary deleted|Error: User .* does not have a network named \[primary\])/, },
     { target: "*controlpanel", command: `AddNetwork ${name} primary`, okay: /^Network primary added to user / },
     { target: "*controlpanel", command: `SetNetwork nick ${name} primary ${user.nick}`, okay: /^Nick = / },
     ...channels.map(channel => ({ target: "*controlpanel", command: `AddChan ${name} primary ${channel}`, okay: /^Channel .* added to network / })),
     { target: "*controlpanel", command: `AddServer ${name} primary ${network.host} +${network.port}`, okay: /^Added IRC Server / },
-    { target: "*controlpanel", command: `Reconnect ${name} primary`, okay: /^Queued network primary of user .* for a reconnect\.$/ },
+    user.online === 0
+      ? { target: "*controlpanel", command: `Disconnect ${name} primary`, okay: /^Closed IRC connection for network primary of user .*\.$/ }
+      : { target: "*controlpanel", command: `Reconnect ${name} primary`, okay: /^Queued network primary of user .* for a reconnect\.$/ },
     { target: "*status", command: "SaveConfig", okay: /^Wrote config to / },
   ];
 }
@@ -88,17 +100,23 @@ export function runZncCommands(config, commands, connect = net.connect) {
 export class ZncProvisioner {
   constructor(config, store, runner = runZncCommands) { this.config = config; this.store = store; this.runner = runner; this.pending = new Map(); }
   async ensure(user) {
-    if (user.provisioned) return;
+    if (user.provisioned && user.buffer_policy) return;
     let task = this.pending.get(user.id);
     if (!task) {
       const work = Promise.resolve().then(async () => {
-        await this.runner(this.config, provisioningCommands(this.config, user));
-        this.store.markProvisioned(user.id, user.config_version);
+        if (user.provisioned) {
+          await this.runner(this.config, bufferPolicyCommands(user));
+          this.store.markBufferPolicy(user.id);
+        } else {
+          await this.runner(this.config, provisioningCommands(this.config, user));
+          this.store.markProvisioned(user.id, user.config_version);
+        }
       });
       task = work.finally(() => this.pending.delete(user.id));
       this.pending.set(user.id, task);
     }
     await task;
-    if (!this.store.userById(user.id).provisioned) return this.ensure(this.store.userById(user.id));
+    const current = this.store.userById(user.id);
+    if (!current.provisioned || !current.buffer_policy) return this.ensure(current);
   }
 }

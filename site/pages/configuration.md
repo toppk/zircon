@@ -25,6 +25,8 @@ services.zircon = {
 |---|---|---|
 | `port` | `3000` | loopback HTTP port for the reverse proxy |
 | `maxUsers` | `16` | most users Zircon will create (1 to 100) |
+| `historyRetentionDays` | `7` | maximum days of channel history (1 to 365) |
+| `historyMaxPerChannel` | `5000` | maximum entries per user and channel (100 to 100000) |
 | `environmentFile` | none, required | secrets file outside `/nix/store` |
 | `settings.publicBaseUrl` | `https://zircon.chooser.us` | public HTTPS origin |
 | `settings.githubClientId` | required | GitHub OAuth app client ID |
@@ -66,6 +68,7 @@ Outside NixOS, Zircon reads the same settings from the environment:
 `PUBLIC_BASE_URL`, `GITHUB_CLIENT_ID`, `OAUTH_CLIENT_ID`,
 `OAUTH_REDIRECT_URIS` (optional, comma separated), `IRC_CHANNELS` (comma separated),
 `IRC_NETWORKS_JSON`, `ZNC_ADMIN_USER`, plus optional `PORT`, `MAX_USERS`,
+`HISTORY_RETENTION_DAYS`, `HISTORY_MAX_PER_CHANNEL`,
 `STATE_DIR` (default `/var/lib/zircon`), `ZNC_HOST`, `ZNC_PORT`,
 `IRC_USERNAME` and `IRC_REALNAME`.
 

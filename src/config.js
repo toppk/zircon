@@ -40,10 +40,14 @@ export function loadConfig() {
   const zncPort = Number(process.env.ZNC_PORT ?? "6667");
   const port = Number(process.env.PORT ?? "3000");
   const maxUsers = Number(process.env.MAX_USERS ?? "16");
+  const historyRetentionDays = Number(process.env.HISTORY_RETENTION_DAYS ?? "7");
+  const historyMaxPerChannel = Number(process.env.HISTORY_MAX_PER_CHANNEL ?? "5000");
   if (![zncPort, port].every(n => Number.isInteger(n) && n > 0 && n <= 65535)) {
     throw new Error("ZNC_PORT and PORT must be valid TCP ports");
   }
   if (!Number.isInteger(maxUsers) || maxUsers < 1 || maxUsers > 100) throw new Error("MAX_USERS must be 1 to 100");
+  if (!Number.isInteger(historyRetentionDays) || historyRetentionDays < 1 || historyRetentionDays > 365) throw new Error("HISTORY_RETENTION_DAYS must be 1 to 365");
+  if (!Number.isInteger(historyMaxPerChannel) || historyMaxPerChannel < 100 || historyMaxPerChannel > 100000) throw new Error("HISTORY_MAX_PER_CHANNEL must be 100 to 100000");
   const zncHost = process.env.ZNC_HOST?.trim() || "127.0.0.1";
   const zncAdminUser = required("ZNC_ADMIN_USER");
   const zncAdminPassword = required("ZNC_ADMIN_PASSWORD");
@@ -79,5 +83,7 @@ export function loadConfig() {
     ircChannels,
     port,
     maxUsers,
+    historyRetentionDays,
+    historyMaxPerChannel,
   };
 }

@@ -6,9 +6,9 @@ Zircon is a Bun service that connects ChatGPT to IRC through one local ZNC proce
 
 Documentation: <https://toppk.github.io/zircon/> (sources in `site/`; `site/build.sh` builds it with pandoc into `_site/`).
 
-Zircon exposes a Streamable HTTP MCP connector at `/mcp` with read tools for channel lists and recent messages. ChatGPT connects with OAuth authorization code, required S256 PKCE, and dynamic client registration; people sign in with GitHub. The existing GPT Action API remains available for compatibility. Zircon stores users, settings, sessions, hashed tokens and post audit entries in SQLite under `/var/lib/zircon`. The API binds `127.0.0.1:3000`; HAProxy supplies public HTTPS at `https://zircon.chooser.us`. ZNC's IRC client listener remains on loopback `127.0.0.1:6667`, with no web admin or public client port.
+Zircon exposes a Streamable HTTP MCP connector at `/mcp` for reading and searching timestamped IRC history, checking mentions, sending messages, and going online or offline. ChatGPT connects with OAuth authorization code, required S256 PKCE, and dynamic client registration; people sign in with GitHub. The existing GPT Action API remains available for compatibility. Zircon stores users, settings, sessions, hashed tokens, channel history and post audit entries in SQLite under `/var/lib/zircon`. The API binds `127.0.0.1:3000`; HAProxy supplies public HTTPS at `https://zircon.chooser.us`. ZNC's IRC client listener remains on loopback `127.0.0.1:6667`, with no web admin or public client port.
 
-The [deployment handoff](DEPLOY.md) covers the ne2 setup, MCP connector, secrets, backups and remaining public launch work.
+The [deployment handoff](DEPLOY.md) covers the ne2 setup, MCP connector, secrets and backups. The [roadmap](ROADMAP.md) tracks product and Directory review work.
 
 ## API
 

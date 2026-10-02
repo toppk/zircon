@@ -18,6 +18,8 @@ in {
       description = "Loopback HTTP port for the reverse proxy.";
     };
     maxUsers = mkOption { type = types.ints.between 1 100; default = 16; description = "Maximum enabled ZNC user accounts created through Zircon."; };
+    historyRetentionDays = mkOption { type = types.ints.between 1 365; default = 7; description = "Days to retain channel activity in SQLite."; };
+    historyMaxPerChannel = mkOption { type = types.ints.between 100 100000; default = 5000; description = "Maximum retained activities per user and channel."; };
     environmentFile = mkOption {
       type = types.nullOr types.path;
       default = null;
@@ -66,6 +68,8 @@ in {
       environment = {
         PORT = toString cfg.port;
         MAX_USERS = toString cfg.maxUsers;
+        HISTORY_RETENTION_DAYS = toString cfg.historyRetentionDays;
+        HISTORY_MAX_PER_CHANNEL = toString cfg.historyMaxPerChannel;
         PUBLIC_BASE_URL = settings.publicBaseUrl;
         GITHUB_CLIENT_ID = settings.githubClientId;
         OAUTH_CLIENT_ID = settings.oauthClientId;

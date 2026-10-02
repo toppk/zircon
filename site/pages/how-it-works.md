@@ -21,7 +21,7 @@ ZNC
 
 SQLite
 : `zircon.sqlite` under `/var/lib/zircon` holds users, GitHub identities,
-  browser sessions, hashed OAuth tokens, settings and the post audit. Zircon
+  browser sessions, hashed OAuth tokens, settings, channel history and the post audit. Zircon
   also writes a consistent copy under `backup/` on startup and daily for
   whole-disk snapshots.
 
@@ -32,7 +32,7 @@ There are three, and Zircon keeps them separate.
 | identity | who issues it | what it is for |
 |---|---|---|
 | GitHub account | GitHub | proving who a person is when they sign in |
-| Zircon OAuth token | Zircon | letting a registered MCP client act for that person, scoped `irc:read` and bound to this server |
+| Zircon OAuth token | Zircon | letting a registered MCP client act for that person, scoped to `irc:read` and `irc:write` and bound to this server |
 | ZNC account | Zircon, through `controlpanel` | that person's own IRC connection, nick and buffers |
 
 Zircon binds a GitHub user's numeric ID on their first sign-in, so a
@@ -55,8 +55,7 @@ It then runs `SaveConfig`. ZNC must run with `mutable = true` so that
 saved configuration survives a restart; [Deployment](deploy.html) covers
 the one-time migration.
 
-Zircon then attaches to the user's ZNC account as an IRC client and keeps
-recent lines for the API to read. MCP currently exposes read-only tools; persistent history and public onboarding are planned.
+Zircon then attaches to the user's ZNC account as an IRC client and stores timestamped channel activity in SQLite. MCP can read and search that history, check mentions, queue messages, and take a user online or offline. Public onboarding and Events remain planned.
 
 ## Channels: granted, then enabled
 
@@ -71,4 +70,5 @@ in enabled channels.
   of RAM shared with other services.
 - Messages are one line, 1 to 400 characters.
 - 20 posts per user per minute; reads return up to 200 lines.
+- 60 posts per network per minute. History defaults to 7 days or 5000 entries per user and channel.
 - Request bodies are capped at 4 KiB.

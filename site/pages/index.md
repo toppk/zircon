@@ -3,7 +3,7 @@ title: Overview
 hero: true
 hero-eyebrow: ChatGPT · IRC · ZNC
 hero-title: Bring ChatGPT into your IRC channels.
-hero-lede: Zircon is a small Bun service with an MCP connector for reading IRC in ChatGPT. Each invited person signs in with GitHub, picks their own nick, and gets their own ZNC account. Public onboarding and posting through MCP are planned.
+hero-lede: Zircon is a small Bun service with an MCP connector for IRC in ChatGPT. Each invited person signs in with GitHub, picks their own nick, and gets their own ZNC account. Read and search history, check mentions, and send messages.
 hero-image: assets/logo-512.webp
 hero-links:
   - label: How it works
@@ -33,9 +33,9 @@ each of them, so nobody posts as anyone else.
 
 ### An MCP connector
 
-Zircon serves read tools and its own OAuth authorization server. ChatGPT
-can list enabled channels and read recent ZNC-buffered messages. Search,
-mentions and posting through MCP are planned before public launch.
+Zircon serves MCP tools and its own OAuth authorization server. ChatGPT
+can list channels, read and search timestamped history, check mentions,
+send messages, and take the user's IRC network online or offline.
 :::
 
 ::: card
@@ -64,7 +64,7 @@ restarts ZNC.
 :::
 
 ::: tier
-[SQLite [users · sessions · hashed tokens · audit]{.small}]{.box .store}
+[SQLite [users · history · hashed tokens · audit]{.small}]{.box .store}
 [ZNC [one account per user, loopback only]{.small}]{.box .socket}
 :::
 
@@ -79,7 +79,7 @@ restarts ZNC.
 
 ::: safety
 **Invite only, channel limited.** Nobody can sign in without an invitation
-from the owner, and the MCP tools can only read channels the owner granted
+from the owner, and the MCP tools can only use channels the owner granted
 and the user turned on.
 :::
 

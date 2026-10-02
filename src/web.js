@@ -18,11 +18,11 @@ function redirect(location, headers = {}) {
 function escapeHtml(value) {
   return String(value).replace(/[&<>"']/g, char => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[char]);
 }
-function page(title, body) {
+function page(title, body, formOrigins = []) {
   return new Response(`<!doctype html><html lang="en"><meta charset="utf-8"><title>${escapeHtml(title)}</title><main><h1>${escapeHtml(title)}</h1>${body}</main></html>`, {
     headers: {
       "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store",
-      "Content-Security-Policy": "default-src 'none'; form-action 'self'; frame-ancestors 'none'; base-uri 'none'",
+      "Content-Security-Policy": `default-src 'none'; form-action 'self' ${formOrigins.join(" ")}; frame-ancestors 'none'; base-uri 'none'`,
       "X-Content-Type-Options": "nosniff", "Referrer-Policy": "same-origin",
     },
   });
@@ -123,7 +123,8 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
     }
 
     if (path === "/privacy" && request.method === "GET") return page("Zircon privacy", `<p>Zircon uses GitHub to identify invited users. It stores your GitHub username and numeric ID, IRC settings, browser sessions, hashed OAuth tokens, and an audit of messages you send. It does not store your GitHub access token after sign-in.</p>
-      <p>Your IRC nickname, channels, and messages are visible to people on the IRC networks you use. ChatGPT sends your Action requests to Zircon. The database is included in host backups. Contact the Zircon owner to request account removal.</p>`);
+      <p>Zircon stores channel messages and activity seen through your own ZNC account for up to ${config.historyRetentionDays ?? 7} days or ${config.historyMaxPerChannel ?? 5000} entries per channel, whichever limit is reached first. Times marked as server time came from IRC; observed times mark when Zircon saw a line. ChatGPT receives messages and activity when you use the MCP read tools. Staying online lets Zircon keep recording; going offline stops new collection.</p>
+      <p>Your IRC nickname, channels, and messages are visible to people on the IRC networks you use. The database and ZNC buffers are included in host backups and may remain there beyond live retention until those backups expire. Contact the Zircon owner to request account removal.</p>`);
 
     if (path === "/oauth/authorize" && request.method === "GET") {
       let auth;
@@ -160,7 +161,7 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
           <input type="hidden" name="csrf" value="${csrf(config, token)}">
           <button name="decision" value="approve">Allow</button>
           <button name="decision" value="deny">Deny</button>
-        </form>`);
+        </form>`, [new URL(auth.redirect_uri).origin]);
     }
 
     if (path === "/oauth/authorize/approve" && request.method === "POST") {
@@ -168,13 +169,14 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
       const user = sessionUser(request);
       if (!user || !requireCsrf(request, form)) return json({ error: "Forbidden" }, 403);
       const requestId = form.get("request_id");
-      const auth = typeof requestId === "string" ? store.authRequest(requestId) : null;
+      const decision = form.get("decision") === "approve" ? "approve" : "deny";
+      const code = createHmac("sha256", config.sessionSecret).update(`${requestId}:${user.id}`).digest("base64url");
+      const auth = typeof requestId === "string" ? store.completeAuthRequest(requestId, user.id, decision, code) : null;
       if (!auth) return oauthError("invalid_request");
-      store.deleteAuthRequest(requestId);
       const callback = new URL(auth.redirect_uri);
       callback.searchParams.set("state", auth.state);
-      if (form.get("decision") !== "approve") callback.searchParams.set("error", "access_denied");
-      else callback.searchParams.set("code", store.createAuthCode(user.id, auth));
+      if (decision === "deny") callback.searchParams.set("error", "access_denied");
+      else callback.searchParams.set("code", code);
       return redirect(callback.toString());
     }
 
@@ -234,6 +236,7 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
       const user = store.githubUser(identity.id, identity.login);
       if (!user) return page("Invitation required", "<p>Ask the Zircon owner to invite your GitHub username.</p>");
       const session = store.createSession(user.id);
+      if (user.online) void pool.forUser(user).catch(error => console.error("Could not start IRC client after sign-in:", error.message));
       const next = login.request_id ? `/oauth/authorize?request_id=${encodeURIComponent(login.request_id)}` : "/settings";
       const headers = new Headers();
       headers.append("Set-Cookie", `${SESSION_COOKIE}=${session}; Path=/; Secure; HttpOnly; SameSite=Lax; Max-Age=604800`);
@@ -248,7 +251,7 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
       const selected = new Set(JSON.parse(user.selected_channels));
       const options = allowed.map(channel => `<label><input type="checkbox" name="channel" value="${escapeHtml(channel)}" ${selected.has(channel) ? "checked" : ""}>${escapeHtml(channel)}</label>`).join("<br>");
       const networks = config.ircNetworks.map(network => `<option value="${escapeHtml(network.name)}" ${network.name === user.network_name ? "selected" : ""}>${escapeHtml(network.name)} (${escapeHtml(network.host)})</option>`).join("");
-      return page("Zircon settings", `<p>GitHub: ${escapeHtml(user.github_login)}</p><form method="post" action="/settings">
+      return page("Zircon settings", `<p>GitHub: ${escapeHtml(user.github_login)}</p><p>IRC is ${user.online ? "online" : "offline"}. Staying online records new channel activity and enables future mention events. ChatGPT can use go_offline and go_online when you ask it to change your presence.</p><form method="post" action="/settings">
         <input type="hidden" name="csrf" value="${csrf(config, cookieValue(request))}">
         <label>IRC network <select name="network_name">${networks}</select></label>
         <label>IRC nick <input name="nick" maxlength="31" value="${escapeHtml(user.nick)}" required></label>
@@ -277,6 +280,7 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
           console.error("Could not apply IRC settings:", error.message);
           return page("IRC setup pending", "<p>Your settings were saved, but ZNC could not apply them. Please retry saving shortly.</p>");
         }
+        if (user.online) void pool.forUser(store.userById(user.id)).catch(error => console.error("Could not reconnect IRC after settings change:", error.message));
       }
       return redirect(`${base}/settings`);
     }

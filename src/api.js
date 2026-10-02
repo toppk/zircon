@@ -6,7 +6,7 @@ const json = (body, status = 200) => Response.json(body, { status, headers: { "C
 export function openApi(config) {
   return {
     openapi: "3.1.0",
-    info: { title: "Zircon IRC", version: "0.2.0", description: "Read and send messages in your configured IRC channels." },
+    info: { title: "Zircon IRC", version: "0.4.0", description: "Read and send messages in your configured IRC channels." },
     servers: [{ url: config.publicBaseUrl }],
     components: { securitySchemes: { zirconOAuth: { type: "oauth2", flows: { authorizationCode: {
       authorizationUrl: `${config.publicBaseUrl}/oauth/authorize`, tokenUrl: `${config.publicBaseUrl}/oauth/token`,
@@ -47,12 +47,15 @@ export function createHandler(config, pool, store, getGithubIdentity) {
     const user = store.accessUser(token, request.method === "POST" ? "irc:write" : "irc:read");
     if (!user) return Response.json({ error: "Unauthorized" }, { status: 401, headers: { "WWW-Authenticate": "Bearer", "Cache-Control": "no-store" } });
     const selected = new Set(JSON.parse(user.selected_channels));
-    let irc;
-    try { irc = await pool.forUser(user); } catch (error) {
-      console.error("ZNC provisioning failed:", error.message);
-      return json({ error: "IRC setup unavailable" }, 503);
+    if (url.pathname === "/v1/status") {
+      if (!user.online) return json({ connected: false, joined_channels: [], enabled_channels: [...selected].sort(), online: false });
+      let irc;
+      try { irc = await pool.forUser(user); } catch (error) {
+        console.error("ZNC provisioning failed:", error.message);
+        return json({ error: "IRC setup unavailable" }, 503);
+      }
+      return json({ connected: irc.connected, joined_channels: [...irc.joined].filter(c => selected.has(c)).sort(), enabled_channels: [...selected].sort(), online: true });
     }
-    if (url.pathname === "/v1/status") return json({ connected: irc.connected, joined_channels: [...irc.joined].filter(c => selected.has(c)).sort(), enabled_channels: [...selected].sort() });
     let name;
     try { name = decodeURIComponent(match[1]); } catch { return json({ error: "Invalid channel name" }, 400); }
     const channel = [...selected].find(item => item.slice(1).toLowerCase() === name.toLowerCase());
@@ -60,18 +63,25 @@ export function createHandler(config, pool, store, getGithubIdentity) {
     if (request.method === "GET") {
       const rawLimit = url.searchParams.get("limit") ?? "50";
       if (!/^[0-9]+$/.test(rawLimit) || Number(rawLimit) < 1 || Number(rawLimit) > 200) return json({ error: "limit must be 1 to 200" }, 400);
-      return json({ messages: irc.messages(channel, Number(rawLimit)) });
+      return json({ messages: store.recentActivity(user, channel, Number(rawLimit)).filter(item => item.kind === "message") });
     }
     if (!store.allowRate(`post:${user.id}`, 20, 60_000)) return json({ error: "Too many messages" }, 429);
     let payload;
     try { payload = await request.json(); } catch { return json({ error: "Invalid JSON" }, 400); }
     const message = payload && typeof payload === "object" ? payload.text : null;
     if (typeof message !== "string" || message.length < 1 || message.length > 400 || /[\r\n\x00-\x1f]/.test(message)) return json({ error: "text must be one line of 1 to 400 characters" }, 422);
+    let irc;
+    try { irc = await pool.forUser(user); } catch (error) {
+      console.error("ZNC provisioning failed:", error.message);
+      return json({ error: "IRC setup unavailable" }, 503);
+    }
     try { irc.sendMessage(channel, message); } catch (error) {
       if (error instanceof RangeError) return json({ error: error.message }, 422);
       return json({ error: "IRC channel is unavailable" }, 503);
     }
     store.auditPost(user, channel, message);
+    const time = new Date().toISOString();
+    store.recordActivity(user, { channel, kind: "message", time, observedAt: time, timestampSource: "local", nick: user.nick, text: message });
     return json({ accepted: true, channel }, 202);
   };
 }

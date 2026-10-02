@@ -8,8 +8,10 @@ export const tokenHash = token => createHash("sha256").update(token).digest("hex
 const now = () => Date.now();
 
 export class Store {
-  constructor(path) {
+  constructor(path, { historyRetentionDays = 7, historyMaxPerChannel = 5000 } = {}) {
     this.path = path;
+    this.historyRetentionDays = historyRetentionDays;
+    this.historyMaxPerChannel = historyMaxPerChannel;
     if (path !== ":memory:") mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
     this.db = new Database(path, { create: true });
     this.db.run("PRAGMA journal_mode = WAL");
@@ -20,7 +22,8 @@ export class Store {
         allowed_channels TEXT NOT NULL, selected_channels TEXT NOT NULL,
         network_name TEXT NOT NULL, nick TEXT NOT NULL, znc_username TEXT NOT NULL UNIQUE,
         provisioned INTEGER NOT NULL DEFAULT 0, config_version INTEGER NOT NULL DEFAULT 0,
-        enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL
+        enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL,
+        online INTEGER NOT NULL DEFAULT 1, buffer_policy INTEGER NOT NULL DEFAULT 0
       );
       CREATE TABLE IF NOT EXISTS github_states (
         hash TEXT PRIMARY KEY, request_id TEXT, expires_at INTEGER NOT NULL
@@ -31,7 +34,7 @@ export class Store {
       CREATE TABLE IF NOT EXISTS auth_requests (
         id TEXT PRIMARY KEY, client_id TEXT NOT NULL, redirect_uri TEXT NOT NULL,
         state TEXT NOT NULL, scope TEXT NOT NULL, code_challenge TEXT,
-        expires_at INTEGER NOT NULL
+        expires_at INTEGER NOT NULL, completed_by TEXT, decision TEXT
       );
       CREATE TABLE IF NOT EXISTS auth_codes (
         hash TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id),
@@ -54,11 +57,44 @@ export class Store {
         id TEXT PRIMARY KEY, redirect_uris TEXT NOT NULL, created_at INTEGER NOT NULL,
         auth_method TEXT NOT NULL DEFAULT 'none', secret_hash TEXT
       );
+      CREATE TABLE IF NOT EXISTS channel_activity (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, user_id TEXT NOT NULL REFERENCES users(id),
+        network TEXT NOT NULL, channel TEXT NOT NULL, kind TEXT NOT NULL,
+        time TEXT NOT NULL, observed_at TEXT NOT NULL, timestamp_source TEXT NOT NULL,
+        nick TEXT NOT NULL, text TEXT NOT NULL, target TEXT,
+        fingerprint TEXT NOT NULL UNIQUE
+      );
+      CREATE INDEX IF NOT EXISTS activity_user_channel_time ON channel_activity(user_id,network,channel,time,id);
+      CREATE INDEX IF NOT EXISTS activity_user_id ON channel_activity(user_id,id);
+      CREATE VIRTUAL TABLE IF NOT EXISTS activity_fts USING fts5(text, content='channel_activity', content_rowid='id');
+      CREATE TRIGGER IF NOT EXISTS activity_fts_insert AFTER INSERT ON channel_activity BEGIN
+        INSERT INTO activity_fts(rowid,text) VALUES (new.id,new.text);
+      END;
+      CREATE TRIGGER IF NOT EXISTS activity_fts_delete AFTER DELETE ON channel_activity BEGIN
+        INSERT INTO activity_fts(activity_fts,rowid,text) VALUES ('delete',old.id,old.text);
+      END;
+      CREATE TABLE IF NOT EXISTS mention_cursors (
+        user_id TEXT PRIMARY KEY REFERENCES users(id), last_id INTEGER NOT NULL DEFAULT 0
+      );
+      CREATE TABLE IF NOT EXISTS post_requests (
+        user_id TEXT NOT NULL REFERENCES users(id), idempotency_key TEXT NOT NULL,
+        channel TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL,
+        created_at INTEGER NOT NULL, PRIMARY KEY(user_id,idempotency_key)
+      );
     `);
     for (const table of ["auth_requests", "auth_codes", "tokens"]) {
       if (!this.db.query(`PRAGMA table_info(${table})`).all().some(column => column.name === "resource")) {
         this.db.run(`ALTER TABLE ${table} ADD COLUMN resource TEXT`);
       }
+    }
+    const authColumns = this.db.query("PRAGMA table_info(auth_requests)").all().map(column => column.name);
+    if (!authColumns.includes("completed_by")) this.db.run("ALTER TABLE auth_requests ADD COLUMN completed_by TEXT");
+    if (!authColumns.includes("decision")) this.db.run("ALTER TABLE auth_requests ADD COLUMN decision TEXT");
+    if (!this.db.query("PRAGMA table_info(users)").all().some(column => column.name === "online")) {
+      this.db.run("ALTER TABLE users ADD COLUMN online INTEGER NOT NULL DEFAULT 1");
+    }
+    if (!this.db.query("PRAGMA table_info(users)").all().some(column => column.name === "buffer_policy")) {
+      this.db.run("ALTER TABLE users ADD COLUMN buffer_policy INTEGER NOT NULL DEFAULT 0");
     }
     const clientColumns = this.db.query("PRAGMA table_info(oauth_clients)").all().map(column => column.name);
     if (!clientColumns.includes("auth_method")) this.db.run("ALTER TABLE oauth_clients ADD COLUMN auth_method TEXT NOT NULL DEFAULT 'none'");
@@ -108,6 +144,8 @@ export class Store {
 
   userByLogin(login) { return this.db.query("SELECT * FROM users WHERE github_login = ? AND enabled = 1").get(login); }
   userById(id) { return this.db.query("SELECT * FROM users WHERE id = ? AND enabled = 1").get(id); }
+  activeUsers() { return this.db.query("SELECT * FROM users WHERE enabled = 1 AND github_id IS NOT NULL AND online = 1 ORDER BY created_at").all(); }
+  setOnline(userId, online) { this.db.query("UPDATE users SET online = ? WHERE id = ? AND enabled = 1").run(online ? 1 : 0, userId); }
   userCount() { return this.db.query("SELECT count(*) AS count FROM users WHERE enabled = 1").get().count; }
 
   githubUser(githubId, login) {
@@ -129,7 +167,8 @@ export class Store {
     return changed;
   }
 
-  markProvisioned(userId, version) { this.db.query("UPDATE users SET provisioned = 1 WHERE id = ? AND config_version = ?").run(userId, version); }
+  markProvisioned(userId, version) { this.db.query("UPDATE users SET provisioned = 1, buffer_policy = 1 WHERE id = ? AND config_version = ?").run(userId, version); }
+  markBufferPolicy(userId) { this.db.query("UPDATE users SET buffer_policy = 1 WHERE id = ?").run(userId); }
 
   createGithubState(requestId) {
     const state = randomToken();
@@ -186,8 +225,20 @@ export class Store {
   authRequest(id) { return this.db.query("SELECT * FROM auth_requests WHERE id = ? AND expires_at > ?").get(id, now()); }
   deleteAuthRequest(id) { this.db.query("DELETE FROM auth_requests WHERE id = ?").run(id); }
 
-  createAuthCode(userId, request) {
-    const code = randomToken();
+  completeAuthRequest(id, userId, decision, code) {
+    return this.db.transaction(() => {
+      const row = this.authRequest(id);
+      if (!row || (row.completed_by && (row.completed_by !== userId || row.decision !== decision))) return null;
+      if (!row.completed_by) {
+        this.db.query("UPDATE auth_requests SET completed_by = ?, decision = ?, expires_at = ? WHERE id = ?")
+          .run(userId, decision, now() + 5 * 60_000, id);
+        if (decision === "approve") this.createAuthCode(userId, row, code);
+      }
+      return row;
+    })();
+  }
+
+  createAuthCode(userId, request, code = randomToken()) {
     this.db.query("INSERT INTO auth_codes (hash,user_id,client_id,redirect_uri,scope,code_challenge,expires_at,used,resource) VALUES (?,?,?,?,?,?,?,0,?)")
       .run(tokenHash(code), userId, request.client_id, request.redirect_uri, request.scope, request.code_challenge, now() + 5 * 60_000, request.resource);
     return code;
@@ -255,5 +306,90 @@ export class Store {
     this.db.query("INSERT INTO audit (user_id,github_login,channel,text,created_at) VALUES (?,?,?,?,?)")
       .run(user.id, user.github_login, channel, text, now());
     this.db.run("DELETE FROM audit WHERE id NOT IN (SELECT id FROM audit ORDER BY id DESC LIMIT 10000)");
+  }
+
+  reservePost(user, key, channel, message) {
+    return this.db.transaction(() => {
+      const existing = this.db.query("SELECT channel,text,status FROM post_requests WHERE user_id = ? AND idempotency_key = ?")
+        .get(user.id, key);
+      if (existing) return existing.channel === channel && existing.text === message ? existing.status : "conflict";
+      this.db.query("INSERT INTO post_requests VALUES (?,?,?,?,?,?)")
+        .run(user.id, key, channel, message, "pending", now());
+      return "new";
+    })();
+  }
+
+  completePost(user, key) {
+    this.db.query("UPDATE post_requests SET status = 'queued' WHERE user_id = ? AND idempotency_key = ?")
+      .run(user.id, key);
+  }
+
+  cancelPost(user, key) {
+    this.db.query("DELETE FROM post_requests WHERE user_id = ? AND idempotency_key = ? AND status = 'pending'")
+      .run(user.id, key);
+  }
+
+  recordActivity(user, event) {
+    const fingerprint = createHash("sha256").update(JSON.stringify([
+      user.id, user.network_name, event.channel.toLowerCase(), event.kind, event.time,
+      event.nick.toLowerCase(), event.text, event.target ?? null,
+    ])).digest("hex");
+    this.db.query(`INSERT OR IGNORE INTO channel_activity
+      (user_id,network,channel,kind,time,observed_at,timestamp_source,nick,text,target,fingerprint)
+      VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+      .run(user.id, user.network_name, event.channel.toLowerCase(), event.kind, event.time,
+        event.observedAt, event.timestampSource, event.nick, event.text, event.target ?? null, fingerprint);
+    this.historyRecorded = (this.historyRecorded ?? 0) + 1;
+    if (this.historyRecorded % 100 === 0) this.pruneActivity();
+  }
+
+  recentActivity(user, channel, limit = 50) {
+    return this.db.query(`SELECT id,network,channel,kind,time,observed_at AS observedAt,
+      timestamp_source AS timestampSource,nick,text,target FROM channel_activity
+      WHERE user_id = ? AND network = ? AND channel = ? ORDER BY time DESC,id DESC LIMIT ?`)
+      .all(user.id, user.network_name, channel.toLowerCase(), limit).reverse();
+  }
+
+  searchActivity(user, channels, query, since, until, limit = 50) {
+    if (!channels.length) return [];
+    const placeholders = channels.map(() => "?").join(",");
+    return this.db.query(`SELECT a.id,a.network,a.channel,a.kind,a.time,a.observed_at AS observedAt,
+      a.timestamp_source AS timestampSource,a.nick,a.text,a.target FROM activity_fts f
+      JOIN channel_activity a ON a.id = f.rowid WHERE activity_fts MATCH ? AND a.user_id = ?
+      AND a.network = ? AND a.channel IN (${placeholders}) AND a.kind IN ('message','action')
+      AND (? IS NULL OR a.time >= ?) AND (? IS NULL OR a.time <= ?)
+      ORDER BY a.time DESC,a.id DESC LIMIT ?`)
+      .all(`"${query.replaceAll('"', '""')}"`, user.id, user.network_name,
+        ...channels.map(channel => channel.toLowerCase()), since, since, until, until, limit);
+  }
+
+  getMentions(user, channels, limit = 50) {
+    if (!channels.length) return [];
+    const placeholders = channels.map(() => "?").join(",");
+    return this.db.transaction(() => {
+      const cursor = this.db.query("SELECT last_id FROM mention_cursors WHERE user_id = ?").get(user.id)?.last_id ?? 0;
+      const rows = this.db.query(`SELECT id,network,channel,kind,time,observed_at AS observedAt,
+        timestamp_source AS timestampSource,nick,text,target FROM channel_activity
+        WHERE user_id = ? AND network = ? AND channel IN (${placeholders}) AND id > ?
+        AND kind IN ('message','action') AND lower(nick) != lower(?) AND instr(lower(text),lower(?)) > 0
+        ORDER BY id LIMIT ?`).all(user.id, user.network_name, ...channels.map(channel => channel.toLowerCase()), cursor, user.nick, user.nick, limit);
+      const latest = rows.length === limit ? rows.at(-1).id : this.db.query(`SELECT max(id) AS id FROM channel_activity
+        WHERE user_id = ? AND network = ? AND channel IN (${placeholders})`).get(user.id, user.network_name,
+          ...channels.map(channel => channel.toLowerCase())).id ?? cursor;
+      this.db.query("INSERT INTO mention_cursors (user_id,last_id) VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET last_id = excluded.last_id")
+        .run(user.id, latest);
+      return rows;
+    })();
+  }
+
+  pruneActivity() {
+    const cutoff = new Date(now() - this.historyRetentionDays * 86_400_000).toISOString();
+    this.db.query("DELETE FROM channel_activity WHERE time < ?").run(cutoff);
+    this.db.query(`DELETE FROM channel_activity WHERE id IN (
+      SELECT id FROM (SELECT id,row_number() OVER
+        (PARTITION BY user_id,network,channel ORDER BY time DESC,id DESC) AS rank FROM channel_activity)
+      WHERE rank > ?)`)
+      .run(this.historyMaxPerChannel);
+    this.db.query("DELETE FROM post_requests WHERE created_at < ?").run(now() - 7 * 86_400_000);
   }
 }

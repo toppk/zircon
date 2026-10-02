@@ -15,7 +15,7 @@ use. Zircon is invite only: signing in without an invitation shows
 
 Connect the Zircon MCP server at `https://zircon.chooser.us/mcp` in ChatGPT developer mode. The first time it uses Zircon,
 ChatGPT asks you to sign in. You are sent to GitHub, then back to Zircon,
-which asks whether ChatGPT may have `irc:read` access to your
+which asks whether ChatGPT may have `irc:read` and `irc:write` access to your
 allowed channels. Choose **Allow**.
 
 ## 3. Choose your settings
@@ -40,9 +40,11 @@ Channels enabled in ChatGPT
 Saving updates your ZNC account straight away. If ZNC cannot apply the
 change, Zircon keeps your settings and asks you to save again shortly.
 
-## 4. Read
+## 4. Use Zircon
 
-Ask ChatGPT which channels you can access or for recent messages from one of them. Zircon's MCP connector is currently read-only. It returns the live ZNC buffer; persistent searchable history is planned before public launch.
+Ask ChatGPT which channels you can access, what happened recently in one of them, or to search retained messages. Each entry includes a timestamp and relevant channel activity. You can also check mentions or ask ChatGPT to send a message; confirm its destination and text before posting. Zircon can queue a message to ZNC but cannot promise delivery to the IRC network.
+
+Your IRC network stays online by default so Zircon can record new messages. Ask ChatGPT to use `go_offline` if you want to disconnect, and `go_online` to resume. While offline, existing history remains readable but new channel activity and future Events cannot arrive.
 
 ::: note
 People on the IRC network see your nick, channels and messages as with any

@@ -3,10 +3,20 @@ import { StringDecoder } from "node:string_decoder";
 
 export function parseIrcLine(input) {
   let line = input;
+  const tags = {};
+  if (line.startsWith("@")) {
+    const space = line.indexOf(" ");
+    if (space < 0) return { tags, command: "", params: [] };
+    for (const item of line.slice(1, space).split(";")) {
+      const equals = item.indexOf("=");
+      tags[equals < 0 ? item : item.slice(0, equals)] = equals < 0 ? "" : item.slice(equals + 1);
+    }
+    line = line.slice(space + 1);
+  }
   let prefix;
   if (line.startsWith(":")) {
     const space = line.indexOf(" ");
-    if (space < 0) return { command: "", params: [] };
+    if (space < 0) return { tags, command: "", params: [] };
     prefix = line.slice(1, space);
     line = line.slice(space + 1);
   }
@@ -14,7 +24,7 @@ export function parseIrcLine(input) {
   const words = trailing < 0
     ? line.trim().split(/\s+/)
     : [...line.slice(0, trailing).trim().split(/\s+/), line.slice(trailing + 2)];
-  return { prefix, command: (words.shift() ?? "").toUpperCase(), params: words };
+  return { tags, prefix, command: (words.shift() ?? "").toUpperCase(), params: words };
 }
 
 export class IrcClient {
@@ -29,6 +39,8 @@ export class IrcClient {
     this.joined = new Set();
     this.history = new Map();
     this.connected = false;
+    this.capPending = false;
+    this.capOffered = "";
     for (const channel of config.ircChannels) this.history.set(channel.toLowerCase(), []);
   }
 
@@ -68,6 +80,8 @@ export class IrcClient {
     if (this.stopping) return;
     this.buffer = "";
     this.decoder = new StringDecoder("utf8");
+    this.capPending = false;
+    this.capOffered = "";
     const socket = net.connect({ host: this.config.zncHost, port: this.config.zncPort });
     this.socket = socket;
     socket.on("connect", () => this.onConnect());
@@ -88,6 +102,7 @@ export class IrcClient {
 
   onConnect() {
     console.info(`Connected to local ZNC on ${this.config.zncHost}:${this.config.zncPort}`);
+    this.write("CAP LS 302");
     this.write(`PASS ${this.config.zncUser}/${this.config.zncNetwork}:${this.config.zncPassword}`);
     this.write(`NICK ${this.config.ircNick}`);
     this.write(`USER ${this.config.ircUsername} 0 * :${this.config.ircRealname}`);
@@ -108,9 +123,31 @@ export class IrcClient {
   }
 
   onLine(line) {
-    const { prefix, command, params } = parseIrcLine(line);
+    const { tags, prefix, command, params } = parseIrcLine(line);
+    const observedAt = new Date().toISOString();
+    const taggedTime = tags.time && !Number.isNaN(Date.parse(tags.time)) ? new Date(tags.time).toISOString() : null;
+    const stamp = { time: taggedTime ?? observedAt, observedAt, timestampSource: taggedTime ? "server" : "observed" };
+    const nick = prefix?.split("!", 1)[0] ?? "";
+    const record = (channel, kind, text = "", target = null) => {
+      if (!this.history.has(channel.toLowerCase())) return;
+      this.config.onActivity?.({ ...stamp, channel, kind, nick, text, target });
+    };
     if (command === "PING" && params.length) {
       this.write(`PONG :${params.at(-1)}`);
+    } else if (command === "CAP" && params.length >= 2) {
+      const action = params[1];
+      if (action === "LS") {
+        this.capOffered += ` ${params.at(-1)}`;
+        if (params[2] === "*") return;
+        const offered = this.capOffered.split(/\s+/);
+        if (offered.includes("server-time") && offered.includes("message-tags")) {
+          this.capPending = true;
+          this.write("CAP REQ :message-tags server-time");
+        } else this.write("CAP END");
+      } else if (["ACK", "NAK"].includes(action) && this.capPending) {
+        this.capPending = false;
+        this.write("CAP END");
+      }
     } else if (["432", "433", "436", "464", "465"].includes(command)) {
       console.error(`IRC registration failed: ${command}`);
       this.socket?.destroy();
@@ -122,17 +159,28 @@ export class IrcClient {
       if (prefix.split("!", 1)[0]?.toLowerCase() === this.config.ircNick.toLowerCase()) {
         this.joined.add(params[0].toLowerCase());
       }
+      record(params[0], "join");
     } else if (command === "PART" && prefix && params.length) {
       if (prefix.split("!", 1)[0]?.toLowerCase() === this.config.ircNick.toLowerCase()) {
         this.joined.delete(params[0].toLowerCase());
       }
+      record(params[0], "part", params[1] ?? "");
     } else if (command === "KICK" && params.length >= 2) {
       if (params[1].toLowerCase() === this.config.ircNick.toLowerCase()) this.joined.delete(params[0].toLowerCase());
+      record(params[0], "kick", params[2] ?? "", params[1]);
+    } else if (command === "TOPIC" && prefix && params.length >= 2) {
+      record(params[0], "topic", params[1]);
+    } else if (command === "MODE" && prefix && params[0]?.startsWith("#") && params.length >= 2) {
+      record(params[0], "mode", params.slice(1).join(" "));
     } else if (command === "PRIVMSG" && prefix && params.length >= 2) {
       const messages = this.history.get(params[0].toLowerCase());
       if (messages) {
-        messages.push({ time: new Date().toISOString(), channel: params[0], nick: prefix.split("!", 1)[0] ?? "", text: params[1] });
+        const action = /^\x01ACTION (.*)\x01$/.exec(params[1]);
+        const kind = action ? "action" : "message";
+        const text = action ? action[1] : params[1];
+        messages.push({ ...stamp, network: this.config.networkName, channel: params[0], kind, nick, text });
         if (messages.length > 500) messages.shift();
+        record(params[0], kind, text);
       }
     }
   }
