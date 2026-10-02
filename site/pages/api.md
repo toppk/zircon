@@ -136,11 +136,11 @@ curl -X POST -H "Authorization: Bearer $ADMIN_TOKEN" \
 ```
 
 `channels` must come from `ircChannels` and defaults to all of them.
-A new user starts with every granted channel enabled and a nick derived
-from their GitHub login (limited to 31 characters and prefixed with `u` if
-the login starts with a digit). Inviting an existing user replaces their granted channels
-and enables all of them again. Returns `201`,
-or `409` when the user limit is reached.
+A new user starts with no channels enabled and a nick derived from their GitHub
+login (limited to 31 characters and prefixed with `u` if the login starts with
+a digit). The user selects granted channels in `/settings`. Inviting an existing
+user replaces their grants, keeps selections that are still allowed, and leaves
+new grants off. Returns `201`, or `409` when the user limit is reached.
 
 ## Browser pages
 
