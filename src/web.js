@@ -93,7 +93,8 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
     const session = cookieValue(request);
     return session && sameOrigin(request, base) && equal(form.get("csrf"), csrf(config, session));
   };
-  const isOwner = user => user && config.diagnosticsAdminLogins?.includes(user.github_login);
+  const isOwner = user => !!user?.github_id && (config.ownerLogins ?? []).some(login =>
+    store.ownerGithubId(login) === user.github_id);
   const saveInvite = async (login, channels) => {
     if (!/^[a-z0-9-]{1,39}$/.test(login) || !Array.isArray(channels) ||
         channels.some(channel => typeof channel !== "string" || !config.ircChannels.includes(channel))) {

@@ -7,6 +7,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHandler } from "../src/api.js";
 import { EventService, pinnedLookup, publicIp, validCallbackUrl, validWebhookSecret, webhookSignature } from "../src/events.js";
+import { resolveOwnerLogins } from "../src/github.js";
 import { IrcClient, parseIrcLine } from "../src/irc.js";
 import { IrcPool } from "../src/pool.js";
 import { Store } from "../src/store.js";
@@ -281,7 +282,7 @@ test("MCP discovery, OAuth, history, posting and presence tools", async () => {
     expect(status.upstreamConnected).toBeNull();
     expect(status.lastReceived.entryId).toBe(echoed.entryId);
     expect(status.channels[0].lastAcknowledged.entryId).toBe(unread.entries.at(-1).entryId);
-    expect(status.version).toBe("0.7.4");
+    expect(status.version).toBe("0.7.5");
     const lastHour = (await (await mcp("tools/call", { name: "read_history", arguments: { channel: "#soup", mode: "last_hour" } })).json()).result.structuredContent;
     expect(lastHour.entries.some(item => item.entryId === echoed.entryId)).toBe(true);
     expect((await (await mcp("tools/call", { name: "send_message", arguments: outgoing })).json()).result.structuredContent.status).toBe("echoed");
@@ -300,11 +301,13 @@ test("MCP discovery, OAuth, history, posting and presence tools", async () => {
 });
 
 test("owner diagnostics show bounded IRC activity and MCP calls without exposing tokens", async () => {
-  const diagnosticConfig = { ...config, diagnosticsEnabled: true, diagnosticsAdminLogins: ["alice"] };
+  const diagnosticConfig = { ...config, diagnosticsEnabled: true, ownerLogins: ["alice"] };
   const store = new Store(":memory:", diagnosticConfig);
   try {
     const alice = inviteWithChannels(store, "alice");
     const bob = inviteWithChannels(store, "bob");
+    store.githubUser("101", "alice");
+    store.pinOwner("alice", "101");
     const time = new Date().toISOString();
     store.recordActivity(alice, { channel: "#soup", kind: "message", time, observedAt: time,
       timestampSource: "server", nick: "chickenbot", text: "a soup joke" });
@@ -333,7 +336,7 @@ test("owner diagnostics show bounded IRC activity and MCP calls without exposing
 });
 
 test("owner settings list users and manage channel grants without exposing the admin token", async () => {
-  const ownerConfig = { ...config, diagnosticsAdminLogins: ["alice"] };
+  const ownerConfig = { ...config, ownerLogins: ["alice"] };
   const store = new Store(":memory:");
   const dropped = [];
   const reconnected = [];
@@ -341,6 +344,8 @@ test("owner settings list users and manage channel grants without exposing the a
   try {
     const owner = inviteWithChannels(store, "alice");
     const outsider = inviteWithChannels(store, "bob");
+    store.githubUser("101", "alice");
+    store.pinOwner("alice", "101");
     const handle = createHandler(ownerConfig, pool, store, async () => null);
     const request = (path, init = {}) => handle(new Request(new URL(path, base), init));
     const ownerCookie = `__Host-zircon_session=${store.createSession(owner.id)}`;
@@ -375,6 +380,34 @@ test("owner settings list users and manage channel grants without exposing the a
     expect(JSON.parse(store.userByLogin("bob").selected_channels)).toEqual([]);
     expect(dropped).toContain(outsider.id);
     expect(reconnected).toContain(outsider.id);
+  } finally { store.close(); }
+});
+
+test("owner access stays with the pinned GitHub ID after a login is reused", async () => {
+  const ownerConfig = { ...config, ownerLogins: ["alice"] };
+  const store = new Store(":memory:");
+  try {
+    const original = inviteWithChannels(store, "alice");
+    store.githubUser("101", "alice");
+    await resolveOwnerLogins(ownerConfig, store, async () => { throw new Error("lookup should not run"); });
+    expect(store.ownerGithubId("alice")).toBe("101");
+    store.db.query("UPDATE users SET github_login='renamed' WHERE id=?").run(original.id);
+    const replacement = inviteWithChannels(store, "alice");
+    store.githubUser("202", "alice");
+    const handle = createHandler(ownerConfig, {}, store, async () => null);
+    const settings = async user => (await handle(new Request(`${base}/settings`, {
+      headers: { Cookie: `__Host-zircon_session=${store.createSession(user.id)}` } }))).text();
+    expect(await settings(original)).toContain("People with access");
+    expect(await settings(replacement)).not.toContain("People with access");
+    expect(store.pinOwner("alice", "202")).toBe("101");
+    const lookupStore = new Store(":memory:");
+    try {
+      await resolveOwnerLogins({ ownerLogins: ["newowner"] }, lookupStore, async url => {
+        expect(url).toBe("https://api.github.com/users/newowner");
+        return { ok: true, json: async () => ({ login: "newowner", id: 303 }) };
+      });
+      expect(lookupStore.ownerGithubId("newowner")).toBe("303");
+    } finally { lookupStore.close(); }
   } finally { store.close(); }
 });
 

@@ -15,3 +15,27 @@ export async function githubIdentity(config, code, fetcher = fetch) {
   if (!Number.isSafeInteger(user.id) || !/^[A-Za-z0-9-]{1,39}$/.test(user.login ?? "")) throw new Error("Invalid GitHub identity");
   return { id: String(user.id), login: user.login.toLowerCase() };
 }
+
+export async function resolveOwnerLogins(config, store, fetcher = fetch) {
+  for (const login of config.ownerLogins ?? []) {
+    if (store.ownerGithubId(login)) continue;
+    const existing = store.userByLogin(login);
+    if (existing?.github_id) {
+      store.pinOwner(login, existing.github_id);
+      continue;
+    }
+    try {
+      const response = await fetcher(`https://api.github.com/users/${encodeURIComponent(login)}`, {
+        headers: { Accept: "application/vnd.github+json", "X-GitHub-Api-Version": "2022-11-28", "User-Agent": "Zircon" },
+        signal: AbortSignal.timeout(5000),
+      });
+      if (!response.ok) throw new Error(`GitHub returned ${response.status}`);
+      const profile = await response.json();
+      if (!Number.isSafeInteger(profile.id) || profile.id < 1 ||
+          String(profile.login ?? "").toLowerCase() !== login) throw new Error("GitHub identity mismatch");
+      store.pinOwner(login, profile.id);
+    } catch (error) {
+      console.error(`Could not pin owner ${login}:`, error.message);
+    }
+  }
+}

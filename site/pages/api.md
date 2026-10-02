@@ -126,7 +126,7 @@ curl -X POST -H "Authorization: Bearer $TOKEN" \
 
 ## Owner: invite a user
 
-An owner whose GitHub login is listed in `settings.diagnosticsAdminLogins` can
+An owner whose GitHub login is listed in `settings.ownerLogins` can
 sign in and use **People with access** on `/settings`. The panel lists invited
 users, shows their granted and enabled channels, and has forms to invite people
 or replace existing grants. No `ADMIN_TOKEN` is sent to the browser. Unchecking

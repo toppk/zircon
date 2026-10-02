@@ -45,6 +45,9 @@ export class Store {
         enabled INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL,
         online INTEGER NOT NULL DEFAULT 1, buffer_policy INTEGER NOT NULL DEFAULT 0
       );
+      CREATE TABLE IF NOT EXISTS owner_bindings (
+        login TEXT PRIMARY KEY, github_id TEXT NOT NULL, resolved_at INTEGER NOT NULL
+      );
       CREATE TABLE IF NOT EXISTS github_states (
         hash TEXT PRIMARY KEY, request_id TEXT, expires_at INTEGER NOT NULL
       );
@@ -249,6 +252,14 @@ export class Store {
   activeUsers() { return this.db.query("SELECT * FROM users WHERE enabled = 1 AND github_id IS NOT NULL AND online = 1 ORDER BY created_at").all(); }
   setOnline(userId, online) { this.db.query("UPDATE users SET online = ? WHERE id = ? AND enabled = 1").run(online ? 1 : 0, userId); }
   userCount() { return this.db.query("SELECT count(*) AS count FROM users WHERE enabled = 1").get().count; }
+  ownerGithubId(login) {
+    return this.db.query("SELECT github_id AS githubId FROM owner_bindings WHERE login=?").get(login)?.githubId ?? null;
+  }
+  pinOwner(login, githubId) {
+    this.db.query("INSERT OR IGNORE INTO owner_bindings(login,github_id,resolved_at) VALUES (?,?,?)")
+      .run(login, String(githubId), now());
+    return this.ownerGithubId(login);
+  }
   listUsers() {
     return this.db.query(`SELECT github_login AS githubLogin,github_id AS githubId,
       allowed_channels AS allowedChannels,selected_channels AS selectedChannels,

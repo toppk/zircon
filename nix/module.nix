@@ -49,7 +49,8 @@ in {
         ircUsername = mkOption { type = types.str; default = "zircon"; };
         ircRealname = mkOption { type = types.str; default = "Zircon ChatGPT bridge"; };
         ircChannels = mkOption { type = types.listOf types.str; default = []; };
-        diagnosticsAdminLogins = mkOption { type = types.listOf types.str; default = []; description = "Owner GitHub logins permitted to view diagnostics and manage user channel grants with a signed-in browser session."; };
+        ownerLogins = mkOption { type = types.listOf types.str; default = []; description = "Owner GitHub logins resolved once to numeric IDs for browser diagnostics and user management."; };
+        diagnosticsAdminLogins = mkOption { type = types.listOf types.str; default = []; description = "Deprecated alias for ownerLogins. Use ownerLogins instead."; };
       }; };
     };
   };
@@ -73,7 +74,7 @@ in {
         HISTORY_RETENTION_DAYS = toString cfg.historyRetentionDays;
         HISTORY_MAX_PER_CHANNEL = toString cfg.historyMaxPerChannel;
         DIAGNOSTICS_ENABLED = lib.boolToString cfg.enableDiagnostics;
-        DIAGNOSTICS_ADMIN_LOGINS = lib.concatStringsSep "," settings.diagnosticsAdminLogins;
+        OWNER_LOGINS = lib.concatStringsSep "," (if settings.ownerLogins != [] then settings.ownerLogins else settings.diagnosticsAdminLogins);
         PUBLIC_BASE_URL = settings.publicBaseUrl;
         GITHUB_CLIENT_ID = settings.githubClientId;
         OAUTH_CLIENT_ID = settings.oauthClientId;

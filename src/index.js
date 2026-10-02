@@ -4,9 +4,14 @@ import { Store } from "./store.js";
 import { ZncProvisioner } from "./znc-admin.js";
 import { IrcPool } from "./pool.js";
 import { EventService } from "./events.js";
+import { resolveOwnerLogins } from "./github.js";
 
 const config = loadConfig();
 const store = new Store(`${config.stateDir}/zircon.sqlite`, config);
+await resolveOwnerLogins(config, store);
+const ownerResolutionTimer = setInterval(() => {
+  void resolveOwnerLogins(config, store).catch(error => console.error("Owner lookup failed:", error.message));
+}, 60 * 60_000);
 store.backup();
 store.pruneActivity();
 const backupTimer = setInterval(() => {
@@ -32,5 +37,5 @@ const server = Bun.serve({
 console.info(`Zircon listening on ${server.url}`);
 void pool.startAll();
 
-process.on("SIGTERM", () => { clearInterval(backupTimer); clearInterval(pruneTimer); clearInterval(eventTimer); pool.stop(); void server.stop(); store.close(); });
-process.on("SIGINT", () => { clearInterval(backupTimer); clearInterval(pruneTimer); clearInterval(eventTimer); pool.stop(); void server.stop(); store.close(); });
+process.on("SIGTERM", () => { clearInterval(ownerResolutionTimer); clearInterval(backupTimer); clearInterval(pruneTimer); clearInterval(eventTimer); pool.stop(); void server.stop(); store.close(); });
+process.on("SIGINT", () => { clearInterval(ownerResolutionTimer); clearInterval(backupTimer); clearInterval(pruneTimer); clearInterval(eventTimer); pool.stop(); void server.stop(); store.close(); });
