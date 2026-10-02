@@ -55,7 +55,7 @@ It then runs `SaveConfig`. ZNC must run with `mutable = true` so that
 saved configuration survives a restart; [Deployment](deploy.html) covers
 the one-time migration.
 
-Zircon then attaches to the user's ZNC account as an IRC client and stores timestamped channel activity in SQLite. MCP can read and search that history, check mentions, queue messages, and take a user online or offline. Public onboarding and Events remain planned.
+Zircon then attaches to the user's ZNC account as an IRC client and stores timestamped channel activity in SQLite. MCP reads acknowledged unread batches, browses or searches history, queues messages, and takes a user online or offline. Its first event subscription sends matching nick mentions to ChatGPT through signed callbacks while the user stays online. Public onboarding remains planned.
 
 ## Channels: granted, then enabled
 

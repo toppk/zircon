@@ -6,6 +6,24 @@ import { dirname, join } from "node:path";
 export const randomToken = () => randomBytes(32).toString("base64url");
 export const tokenHash = token => createHash("sha256").update(token).digest("hex");
 const now = () => Date.now();
+const parsePageCursor = cursor => {
+  if (!cursor) return null;
+  try {
+    const value = JSON.parse(Buffer.from(cursor, "base64url").toString("utf8"));
+    return Array.isArray(value) && value.length === 2 && typeof value[0] === "string" &&
+      Number.isSafeInteger(value[1]) && value[1] > 0 ? value : false;
+  } catch { return false; }
+};
+const pageCursor = row => Buffer.from(JSON.stringify([row.time, row.id])).toString("base64url");
+const addressesNick = (message, nick) => {
+  const text = message.toLowerCase();
+  const target = nick.toLowerCase();
+  for (let index = text.indexOf(target); index >= 0; index = text.indexOf(target, index + target.length)) {
+    if ((index === 0 || !/[a-z0-9_]/.test(text[index - 1])) &&
+        (index + target.length === text.length || !/[a-z0-9_]/.test(text[index + target.length]))) return true;
+  }
+  return false;
+};
 
 export class Store {
   constructor(path, { historyRetentionDays = 7, historyMaxPerChannel = 5000, diagnosticsEnabled = false } = {}) {
@@ -77,6 +95,31 @@ export class Store {
       CREATE TABLE IF NOT EXISTS mention_cursors (
         user_id TEXT PRIMARY KEY REFERENCES users(id), last_id INTEGER NOT NULL DEFAULT 0
       );
+      CREATE TABLE IF NOT EXISTS unread_cursors (
+        user_id TEXT NOT NULL REFERENCES users(id), client_id TEXT NOT NULL,
+        network TEXT NOT NULL, channel TEXT NOT NULL, last_id INTEGER NOT NULL DEFAULT 0,
+        PRIMARY KEY(user_id,client_id,network,channel)
+      );
+      CREATE TABLE IF NOT EXISTS unread_batches (
+        id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), client_id TEXT NOT NULL,
+        network TEXT NOT NULL, channel TEXT NOT NULL, last_id INTEGER NOT NULL,
+        entries TEXT NOT NULL, has_more INTEGER NOT NULL, acknowledged INTEGER NOT NULL DEFAULT 0,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS unread_batches_pending ON unread_batches(user_id,client_id,network,channel,acknowledged);
+      CREATE TABLE IF NOT EXISTS event_subscriptions (
+        id TEXT PRIMARY KEY, user_id TEXT NOT NULL REFERENCES users(id), client_id TEXT NOT NULL,
+        name TEXT NOT NULL, arguments TEXT NOT NULL, url TEXT NOT NULL, secret TEXT NOT NULL,
+        previous_secret TEXT, rotate_until INTEGER,
+        expires_at INTEGER, active INTEGER NOT NULL DEFAULT 1, created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS event_subscriptions_user ON event_subscriptions(user_id,active);
+      CREATE TABLE IF NOT EXISTS event_deliveries (
+        event_id TEXT PRIMARY KEY, subscription_id TEXT NOT NULL REFERENCES event_subscriptions(id),
+        payload TEXT NOT NULL, attempts INTEGER NOT NULL DEFAULT 0, next_attempt_at INTEGER NOT NULL,
+        created_at INTEGER NOT NULL
+      );
+      CREATE INDEX IF NOT EXISTS event_deliveries_due ON event_deliveries(next_attempt_at);
       CREATE TABLE IF NOT EXISTS post_requests (
         user_id TEXT NOT NULL REFERENCES users(id), idempotency_key TEXT NOT NULL,
         channel TEXT NOT NULL, text TEXT NOT NULL, status TEXT NOT NULL,
@@ -105,6 +148,9 @@ export class Store {
     const clientColumns = this.db.query("PRAGMA table_info(oauth_clients)").all().map(column => column.name);
     if (!clientColumns.includes("auth_method")) this.db.run("ALTER TABLE oauth_clients ADD COLUMN auth_method TEXT NOT NULL DEFAULT 'none'");
     if (!clientColumns.includes("secret_hash")) this.db.run("ALTER TABLE oauth_clients ADD COLUMN secret_hash TEXT");
+    const subscriptionColumns = this.db.query("PRAGMA table_info(event_subscriptions)").all().map(column => column.name);
+    if (!subscriptionColumns.includes("previous_secret")) this.db.run("ALTER TABLE event_subscriptions ADD COLUMN previous_secret TEXT");
+    if (!subscriptionColumns.includes("rotate_until")) this.db.run("ALTER TABLE event_subscriptions ADD COLUMN rotate_until INTEGER");
     this.db.run("DELETE FROM github_states WHERE expires_at < ?", [now()]);
     this.db.run("DELETE FROM sessions WHERE expires_at < ?", [now()]);
     this.db.run("DELETE FROM auth_requests WHERE expires_at < ?", [now()]);
@@ -289,12 +335,22 @@ export class Store {
     this.db.query("UPDATE tokens SET revoked = 1 WHERE hash = ? AND client_id = ?").run(tokenHash(token), clientId);
   }
 
-  accessUser(token, requiredScope, resource = null) {
+  accessPrincipal(token, requiredScope, resource = null) {
     if (!token) return null;
     const row = this.db.query("SELECT * FROM tokens WHERE hash = ? AND kind = 'access' AND revoked = 0 AND expires_at > ?")
       .get(tokenHash(token), now());
     if (!row || row.resource !== resource || !row.scope.split(" ").includes(requiredScope)) return null;
-    return this.userById(row.user_id);
+    const user = this.userById(row.user_id);
+    return user ? { user, clientId: row.client_id } : null;
+  }
+
+  accessUser(token, requiredScope, resource = null) {
+    return this.accessPrincipal(token, requiredScope, resource)?.user ?? null;
+  }
+
+  hasEventAccess(userId, clientId) {
+    return Boolean(this.db.query(`SELECT 1 FROM tokens WHERE user_id=? AND client_id=? AND resource IS NOT NULL AND revoked=0
+      AND expires_at>? AND (' ' || scope || ' ') LIKE '% irc:read %' LIMIT 1`).get(userId, clientId, now()));
   }
 
   allowRate(key, limit, windowMs) {
@@ -312,6 +368,10 @@ export class Store {
     this.db.query("INSERT INTO audit (user_id,github_login,channel,text,created_at) VALUES (?,?,?,?,?)")
       .run(user.id, user.github_login, channel, text, now());
     this.db.run("DELETE FROM audit WHERE id NOT IN (SELECT id FROM audit ORDER BY id DESC LIMIT 10000)");
+  }
+
+  outgoingMessageId(user, key) {
+    return `msg_${createHash("sha256").update(`${user.id}:${key}`).digest("base64url").slice(0, 24)}`;
   }
 
   reservePost(user, key, channel, message) {
@@ -340,13 +400,109 @@ export class Store {
       user.id, user.network_name, event.channel.toLowerCase(), event.kind, event.time,
       event.nick.toLowerCase(), event.text, event.target ?? null,
     ])).digest("hex");
-    this.db.query(`INSERT OR IGNORE INTO channel_activity
-      (user_id,network,channel,kind,time,observed_at,timestamp_source,nick,text,target,fingerprint)
-      VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
-      .run(user.id, user.network_name, event.channel.toLowerCase(), event.kind, event.time,
-        event.observedAt, event.timestampSource, event.nick, event.text, event.target ?? null, fingerprint);
+    this.db.transaction(() => {
+      const inserted = this.db.query(`INSERT OR IGNORE INTO channel_activity
+        (user_id,network,channel,kind,time,observed_at,timestamp_source,nick,text,target,fingerprint)
+        VALUES (?,?,?,?,?,?,?,?,?,?,?)`)
+        .run(user.id, user.network_name, event.channel.toLowerCase(), event.kind, event.time,
+          event.observedAt, event.timestampSource, event.nick, event.text, event.target ?? null, fingerprint);
+      if (inserted.changes) this.enqueueMentionEvents(user, event);
+    })();
     this.historyRecorded = (this.historyRecorded ?? 0) + 1;
     if (this.historyRecorded % 100 === 0) this.pruneActivity();
+  }
+
+  eventSubscriptionId(user, clientId, name, args, url) {
+    const canonical = JSON.stringify(Object.fromEntries(Object.entries(args).sort(([a], [b]) => a.localeCompare(b))));
+    return `sub_${createHash("sha256").update(JSON.stringify([user.id, clientId, name, canonical, url])).digest("base64url").slice(0, 32)}`;
+  }
+
+  saveEventSubscription(user, clientId, name, args, url, secret, expiresAt) {
+    const id = this.eventSubscriptionId(user, clientId, name, args, url);
+    this.db.query(`INSERT INTO event_subscriptions(id,user_id,client_id,name,arguments,url,secret,expires_at,active,created_at)
+      VALUES (?,?,?,?,?,?,?,?,1,?) ON CONFLICT(id) DO UPDATE SET
+      previous_secret=CASE WHEN secret!=excluded.secret THEN secret ELSE previous_secret END,
+      rotate_until=CASE WHEN secret!=excluded.secret THEN excluded.created_at+300000 ELSE rotate_until END,
+      secret=excluded.secret,expires_at=excluded.expires_at,active=1`)
+      .run(id, user.id, clientId, name, JSON.stringify(args), url, secret, expiresAt, now());
+    this.recordDiagnostic(user, "event", "subscribe", id);
+    return id;
+  }
+
+  removeEventSubscription(user, clientId, name, args, url) {
+    const id = this.eventSubscriptionId(user, clientId, name, args, url);
+    this.db.query("DELETE FROM event_deliveries WHERE subscription_id=?").run(id);
+    this.db.query("DELETE FROM event_subscriptions WHERE id=? AND user_id=? AND client_id=?").run(id, user.id, clientId);
+    this.recordDiagnostic(user, "event", "unsubscribe", id);
+  }
+
+  revokeEventSubscription(user, id) {
+    return this.db.transaction(() => {
+      const row = this.db.query("SELECT id FROM event_subscriptions WHERE id=? AND user_id=?").get(id, user.id);
+      if (!row) return false;
+      this.db.query("DELETE FROM event_deliveries WHERE subscription_id=?").run(id);
+      this.db.query("DELETE FROM event_subscriptions WHERE id=?").run(id);
+      this.recordDiagnostic(user, "event", "revoke", id);
+      return true;
+    })();
+  }
+
+  listEventSubscriptions(user) {
+    return this.db.query(`SELECT id,name,arguments,url,expires_at AS expiresAt FROM event_subscriptions
+      WHERE user_id=? AND active=1 AND (expires_at IS NULL OR expires_at>?) ORDER BY created_at DESC`)
+      .all(user.id, now()).map(row => ({ ...row, arguments: JSON.parse(row.arguments),
+        expiresAt: row.expiresAt === null ? null : new Date(row.expiresAt).toISOString() }));
+  }
+
+  enqueueMentionEvents(user, event) {
+    if (!["message", "action"].includes(event.kind) || event.nick.toLowerCase() === user.nick.toLowerCase() ||
+        event.timestampSource === "local") return;
+    if (!addressesNick(event.text, user.nick)) return;
+    const text = event.text.toLowerCase();
+    const selected = JSON.parse(user.selected_channels).map(channel => channel.toLowerCase());
+    if (!selected.includes(event.channel.toLowerCase())) return;
+    const subscriptions = this.db.query(`SELECT * FROM event_subscriptions WHERE user_id=? AND name='message.mention'
+      AND active=1 AND (expires_at IS NULL OR expires_at>?)`).all(user.id, now());
+    for (const subscription of subscriptions) {
+      const filter = JSON.parse(subscription.arguments);
+      if (filter.network && filter.network !== user.network_name) continue;
+      if (filter.channel && filter.channel.toLowerCase() !== event.channel.toLowerCase()) continue;
+      if (filter.sender && filter.sender.toLowerCase() !== event.nick.toLowerCase()) continue;
+      if (filter.keyword && !text.includes(filter.keyword.toLowerCase())) continue;
+      if (!this.allowRate(`event:${subscription.id}`, 12, 60_000)) {
+        this.recordDiagnostic(user, "event", "rate_limited", subscription.id);
+        continue;
+      }
+      const queued = this.db.query("SELECT count(*) AS count FROM event_deliveries").get().count;
+      if (queued >= 1000) { this.recordDiagnostic(user, "event", "queue_full", subscription.id); continue; }
+      const payload = JSON.stringify({ eventId: `evt_${randomToken()}`, name: "message.mention",
+        timestamp: event.time, data: { network: user.network_name, channel: event.channel,
+          sender: event.nick, text: event.text, kind: event.kind, observedAt: event.observedAt }, cursor: null });
+      if (Buffer.byteLength(payload) > 256 * 1024) continue;
+      const eventId = JSON.parse(payload).eventId;
+      this.db.query(`INSERT INTO event_deliveries(event_id,subscription_id,payload,next_attempt_at,created_at)
+        VALUES (?,?,?,?,?)`).run(eventId, subscription.id, payload, now(), now());
+      this.recordDiagnostic(user, "event", "queued", eventId);
+    }
+  }
+
+  nextEventDelivery() {
+    return this.db.query(`SELECT d.*,s.url,s.secret,s.previous_secret,s.rotate_until,s.user_id,s.client_id,s.name,s.arguments,s.expires_at
+      FROM event_deliveries d JOIN event_subscriptions s ON s.id=d.subscription_id
+      WHERE d.next_attempt_at<=? ORDER BY d.next_attempt_at,d.created_at LIMIT 1`).get(now());
+  }
+
+  finishEventDelivery(eventId, status) {
+    if (status === "retry") {
+      const row = this.db.query("SELECT attempts FROM event_deliveries WHERE event_id=?").get(eventId);
+      if (row && row.attempts < 5) {
+        const delay = Math.min(300_000, 2000 * 2 ** row.attempts);
+        this.db.query("UPDATE event_deliveries SET attempts=attempts+1,next_attempt_at=? WHERE event_id=?")
+          .run(now() + delay, eventId);
+        return;
+      }
+    }
+    this.db.query("DELETE FROM event_deliveries WHERE event_id=?").run(eventId);
   }
 
   recordDiagnostic(user, category, action, result = "") {
@@ -379,6 +535,73 @@ export class Store {
       .all(user.id, user.network_name, channel.toLowerCase(), limit).reverse();
   }
 
+  unreadCount(user, clientId, channel) {
+    const cursor = this.db.query(`SELECT last_id FROM unread_cursors WHERE user_id=? AND client_id=? AND network=? AND channel=?`)
+      .get(user.id, clientId, user.network_name, channel.toLowerCase())?.last_id ?? 0;
+    return this.db.query(`SELECT count(*) AS count FROM channel_activity WHERE user_id=? AND network=? AND channel=? AND id>?`)
+      .get(user.id, user.network_name, channel.toLowerCase(), cursor).count;
+  }
+
+  readUnread(user, clientId, channel, limit = 50) {
+    return this.db.transaction(() => {
+      const network = user.network_name;
+      const normalized = channel.toLowerCase();
+      const pending = this.db.query(`SELECT id,entries,has_more FROM unread_batches
+        WHERE user_id=? AND client_id=? AND network=? AND channel=? AND acknowledged=0
+        ORDER BY created_at,id LIMIT 1`).get(user.id, clientId, network, normalized);
+      if (pending) return { batchId: pending.id, entries: JSON.parse(pending.entries), hasMore: Boolean(pending.has_more) };
+      const cursor = this.db.query(`SELECT last_id FROM unread_cursors WHERE user_id=? AND client_id=? AND network=? AND channel=?`)
+        .get(user.id, clientId, network, normalized)?.last_id ?? 0;
+      const rows = this.db.query(`SELECT id,network,channel,kind,time,observed_at AS observedAt,
+        timestamp_source AS timestampSource,nick,text,target FROM channel_activity
+        WHERE user_id=? AND network=? AND channel=? AND id>? ORDER BY id LIMIT ?`)
+        .all(user.id, network, normalized, cursor, limit);
+      if (!rows.length) return { batchId: null, entries: [], hasMore: false };
+      const entries = rows.map(({ id, ...entry }) => ({ ...entry,
+        mention: ["message", "action"].includes(entry.kind) &&
+          entry.nick.toLowerCase() !== user.nick.toLowerCase() &&
+          addressesNick(entry.text, user.nick) }));
+      const lastId = rows.at(-1).id;
+      const hasMore = Boolean(this.db.query(`SELECT 1 FROM channel_activity
+        WHERE user_id=? AND network=? AND channel=? AND id>? LIMIT 1`).get(user.id, network, normalized, lastId));
+      const batchId = `batch_${randomToken()}`;
+      this.db.query(`INSERT INTO unread_batches(id,user_id,client_id,network,channel,last_id,entries,has_more,created_at)
+        VALUES (?,?,?,?,?,?,?,?,?)`).run(batchId, user.id, clientId, network, normalized, lastId,
+          JSON.stringify(entries), Number(hasMore), now());
+      return { batchId, entries, hasMore };
+    })();
+  }
+
+  ackMessages(user, clientId, batchId) {
+    return this.db.transaction(() => {
+      const batch = this.db.query(`SELECT * FROM unread_batches WHERE id=? AND user_id=? AND client_id=?`)
+        .get(batchId, user.id, clientId);
+      if (!batch || batch.network !== user.network_name ||
+          !JSON.parse(user.selected_channels).some(channel => channel.toLowerCase() === batch.channel)) return false;
+      if (batch.acknowledged) return true;
+      this.db.query(`INSERT INTO unread_cursors(user_id,client_id,network,channel,last_id) VALUES (?,?,?,?,?)
+        ON CONFLICT(user_id,client_id,network,channel) DO UPDATE SET last_id=max(last_id,excluded.last_id)`)
+        .run(user.id, clientId, batch.network, batch.channel, batch.last_id);
+      this.db.query("UPDATE unread_batches SET acknowledged=1 WHERE id=?").run(batchId);
+      return true;
+    })();
+  }
+
+  getHistory(user, channel, before = null, limit = 50) {
+    const boundary = parsePageCursor(before);
+    if (boundary === false) return null;
+    const rows = this.db.query(`SELECT id,network,channel,kind,time,observed_at AS observedAt,
+      timestamp_source AS timestampSource,nick,text,target FROM channel_activity
+      WHERE user_id=? AND network=? AND channel=? AND
+        (? IS NULL OR time < ? OR (time = ? AND id < ?))
+      ORDER BY time DESC,id DESC LIMIT ?`).all(user.id, user.network_name, channel.toLowerCase(),
+        boundary?.[0] ?? null, boundary?.[0] ?? null, boundary?.[0] ?? null, boundary?.[1] ?? 0, limit + 1);
+    const hasMore = rows.length > limit;
+    const page = rows.slice(0, limit);
+    const nextBefore = hasMore ? pageCursor(page.at(-1)) : null;
+    return { entries: page.map(({ id, ...entry }) => entry), nextBefore };
+  }
+
   searchActivity(user, channels, query, since, until, limit = 50) {
     if (!channels.length) return [];
     const placeholders = channels.map(() => "?").join(",");
@@ -392,34 +615,39 @@ export class Store {
         ...channels.map(channel => channel.toLowerCase()), since, since, until, until, limit);
   }
 
-  getMentions(user, channels, limit = 50) {
-    if (!channels.length) return [];
+  searchPage(user, channels, query, since, until, before = null, limit = 50) {
+    const boundary = parsePageCursor(before);
+    if (boundary === false) return null;
+    if (!channels.length) return { messages: [], nextBefore: null };
     const placeholders = channels.map(() => "?").join(",");
-    return this.db.transaction(() => {
-      const cursor = this.db.query("SELECT last_id FROM mention_cursors WHERE user_id = ?").get(user.id)?.last_id ?? 0;
-      const rows = this.db.query(`SELECT id,network,channel,kind,time,observed_at AS observedAt,
-        timestamp_source AS timestampSource,nick,text,target FROM channel_activity
-        WHERE user_id = ? AND network = ? AND channel IN (${placeholders}) AND id > ?
-        AND kind IN ('message','action') AND lower(nick) != lower(?) AND instr(lower(text),lower(?)) > 0
-        ORDER BY id LIMIT ?`).all(user.id, user.network_name, ...channels.map(channel => channel.toLowerCase()), cursor, user.nick, user.nick, limit);
-      const latest = rows.length === limit ? rows.at(-1).id : this.db.query(`SELECT max(id) AS id FROM channel_activity
-        WHERE user_id = ? AND network = ? AND channel IN (${placeholders})`).get(user.id, user.network_name,
-          ...channels.map(channel => channel.toLowerCase())).id ?? cursor;
-      this.db.query("INSERT INTO mention_cursors (user_id,last_id) VALUES (?,?) ON CONFLICT(user_id) DO UPDATE SET last_id = excluded.last_id")
-        .run(user.id, latest);
-      return rows;
-    })();
+    const rows = this.db.query(`SELECT a.id,a.network,a.channel,a.kind,a.time,a.observed_at AS observedAt,
+      a.timestamp_source AS timestampSource,a.nick,a.text,a.target FROM activity_fts f
+      JOIN channel_activity a ON a.id=f.rowid WHERE activity_fts MATCH ? AND a.user_id=?
+      AND a.network=? AND a.channel IN (${placeholders}) AND a.kind IN ('message','action')
+      AND (? IS NULL OR a.time>=?) AND (? IS NULL OR a.time<=?)
+      AND (? IS NULL OR a.time<? OR (a.time=? AND a.id<?))
+      ORDER BY a.time DESC,a.id DESC LIMIT ?`).all(`"${query.replaceAll('"', '""')}"`, user.id,
+        user.network_name, ...channels.map(channel => channel.toLowerCase()), since, since, until, until,
+        boundary?.[0] ?? null, boundary?.[0] ?? null, boundary?.[0] ?? null, boundary?.[1] ?? 0, limit + 1);
+    const page = rows.slice(0, limit);
+    return { messages: page.map(({ id, ...row }) => row), nextBefore: rows.length > limit ? pageCursor(page.at(-1)) : null };
   }
 
   pruneActivity() {
     const cutoff = new Date(now() - this.historyRetentionDays * 86_400_000).toISOString();
-    this.db.query("DELETE FROM channel_activity WHERE time < ?").run(cutoff);
+    this.db.query("DELETE FROM channel_activity WHERE observed_at < ?").run(cutoff);
     this.db.query(`DELETE FROM channel_activity WHERE id IN (
       SELECT id FROM (SELECT id,row_number() OVER
         (PARTITION BY user_id,network,channel ORDER BY time DESC,id DESC) AS rank FROM channel_activity)
       WHERE rank > ?)`)
       .run(this.historyMaxPerChannel);
     this.db.query("DELETE FROM post_requests WHERE created_at < ?").run(now() - 7 * 86_400_000);
+    this.db.query(`DELETE FROM unread_batches WHERE created_at < ? OR EXISTS
+      (SELECT 1 FROM json_each(unread_batches.entries) WHERE json_extract(value,'$.observedAt') < ?)`).run(
+        now() - this.historyRetentionDays * 86_400_000, cutoff);
     this.db.query("DELETE FROM diagnostic_events WHERE occurred_at < ?").run(now() - this.historyRetentionDays * 86_400_000);
+    this.db.query("DELETE FROM event_deliveries WHERE created_at < ? OR subscription_id IN (SELECT id FROM event_subscriptions WHERE expires_at IS NOT NULL AND expires_at < ?)")
+      .run(now() - this.historyRetentionDays * 86_400_000, now());
+    this.db.query("DELETE FROM event_subscriptions WHERE expires_at IS NOT NULL AND expires_at < ?").run(now());
   }
 }

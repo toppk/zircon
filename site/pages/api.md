@@ -8,7 +8,7 @@ description: Zircon MCP tools, OAuth discovery, IRC API and admin invite.
 ## Discovery
 
 `POST /mcp` or `POST /mcp/`
-: Streamable HTTP MCP endpoint. It responds to JSON-RPC initialization, `tools/list` and `tools/call` with JSON. An unauthenticated request returns an OAuth discovery challenge.
+: Streamable HTTP MCP endpoint. It responds to JSON-RPC initialization, `server/discover`, tool and event methods with JSON. An unauthenticated request returns an OAuth discovery challenge.
 
 `GET /.well-known/oauth-protected-resource`
 : Resource metadata for the MCP connector.
@@ -51,15 +51,22 @@ Each dynamically registered redirect URI must exactly match one submitted at reg
 
 | tool | scope | result |
 |---|---|---|
-| `list_channels` | `irc:read` | The user's chosen network, enabled channels and online status |
-| `get_channel_messages` | `irc:read` | Up to 200 retained messages and channel events from one enabled channel |
-| `search_messages` | `irc:read` | Search retained messages, optionally by channel and UTC time |
-| `get_mentions` | `irc:read` | Return new mentions of the user's nick and mark them seen |
-| `send_message` | `irc:write` | Queue one message to an enabled channel; use an idempotency key for retries |
+| `list_channels` | `irc:read` | Network, enabled channels, online preference, connection state and unread counts |
+| `read_unread` | `irc:read` | Next unacknowledged batch in one channel, oldest arrival first; returns `batchId`, `entries`, `hasMore` |
+| `ack_messages` | `irc:read` | Advance only the calling OAuth client's channel cursor after processing a batch |
+| `get_history` | `irc:read` | Browse retained activity newest first with opaque `before`/`nextBefore` pagination; no cursor change |
+| `search_messages` | `irc:read` | Case-insensitive exact phrase search, newest first, with channel, UTC time and opaque pagination |
+| `send_message` | `irc:write` | Queue one message to an enabled channel; returns a stable `messageId` for retries |
 | `go_offline` | `irc:write` | Disconnect the user's upstream IRC network |
 | `go_online` | `irc:write` | Reconnect the user's upstream IRC network |
 
-Activity includes messages, actions, joins, parts, kicks, topics and modes. Each entry has network and channel context, the sender's nick, event time, observation time, and a timestamp source (`server`, `observed` or `local`). History is scoped to the signed-in user and enabled channels. `send_message` returns **queued**, never a delivery guarantee. Staying online lets Zircon keep collecting messages for history and future Events.
+Activity includes messages, actions, joins, parts, kicks, topics and modes. Each entry has network and channel context, the sender's nick, event time, observation time, and a timestamp source (`server`, `observed` or `local`). `read_unread` also marks entries that mention the user's current IRC nick. Repeat a read until its batch is processed, then call `ack_messages`; new arrivals remain unread. History and search leave unread state unchanged. Retention limits still apply to old unacknowledged data. `send_message` returns **queued**, never a delivery guarantee. `online` expresses the user's upstream presence choice; `connection` reports Zircon's local ZNC session (`connecting` or `connected`), not proof of an upstream join.
+
+## MCP Events
+
+Zircon advertises MCP 2.0 (`2026-07-28`) through `server/discover` and supports `events/list`, `events/subscribe` and `events/unsubscribe` at the authenticated `/mcp` endpoint. The first event is `message.mention`: a new channel message addressing the user's current nick. Subscription filters are `network`, `channel`, `sender` and `keyword`. The channel must be enabled for the signed-in user. An event includes network, channel, sender, text, kind and observation time. IRC messages sent under the user's own nick do not emit events.
+
+Subscriptions survive restarts. Zircon verifies the HTTPS callback before activation, signs each delivery using Standard Webhooks, and retries transient failures from a bounded background queue. The same event ID is used on retries. Users can view and revoke subscriptions at `/settings`. Event delivery requires Zircon to stay online; ordinary tools work independently of Events. [OpenAI's Events guide](https://developers.openai.com/plugins/build/mcp-events) describes which ChatGPT surfaces can receive events.
 
 ## IRC endpoints
 

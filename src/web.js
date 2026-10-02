@@ -152,6 +152,7 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
     if (path === "/privacy" && request.method === "GET") return page("Zircon privacy", `<p>Zircon uses GitHub to identify invited users. It stores your GitHub username and numeric ID, IRC settings, browser sessions, hashed OAuth tokens, and an audit of messages you send. It does not store your GitHub access token after sign-in.</p>
       <p>Zircon stores channel messages and activity seen through your own ZNC account for up to ${config.historyRetentionDays ?? 7} days or ${config.historyMaxPerChannel ?? 5000} entries per channel, whichever limit is reached first. Times marked as server time came from IRC; observed times mark when Zircon saw a line. ChatGPT receives messages and activity when you use the MCP read tools. Staying online lets Zircon keep recording; going offline stops new collection.</p>
       ${config.diagnosticsEnabled ? `<p>While diagnostics are enabled, Zircon also keeps up to 2000 recent MCP call and IRC connection records for up to ${config.historyRetentionDays ?? 7} days. These records include the signed-in user, action, time and result, but not OAuth tokens or tool arguments. Only the owner can view them.</p>` : ""}
+      <p>If you subscribe to a mention event in ChatGPT, Zircon sends matching channel text, sender, channel and timestamps to the callback ChatGPT provides. You can list and revoke subscriptions in settings. Zircon stores subscription filters, callback URLs, signing secrets and a bounded queue of pending deliveries in its database.</p>
       <p>Your IRC nickname, channels, and messages are visible to people on the IRC networks you use. The database and ZNC buffers are included in host backups and may remain there beyond live retention until those backups expire. Contact the Zircon owner to request account removal.</p>`);
 
     if (path === "/oauth/authorize" && request.method === "GET") {
@@ -184,7 +185,7 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
       if (!user) return redirect(`${base}/login?request_id=${encodeURIComponent(requestId)}`);
       const token = cookieValue(request);
       const scopeDetails = {
-        "irc:read": ["Read your IRC channels", "View channel activity, history, search results and mentions."],
+        "irc:read": ["Read your IRC channels", "View channel activity and search history. You may also subscribe to mention events sent to ChatGPT."],
         "irc:write": ["Send messages and change IRC presence", "Post to enabled channels and connect or disconnect your IRC network."],
       };
       const scopes = auth.scope.split(" ").map(scope => {
@@ -289,12 +290,25 @@ export function createWebHandler(config, store, pool, getGithubIdentity = github
       const networks = config.ircNetworks.map(network => `<option value="${escapeHtml(network.name)}" ${network.name === user.network_name ? "selected" : ""}>${escapeHtml(network.name)} (${escapeHtml(network.host)})</option>`).join("");
       const diagnosticsLink = config.diagnosticsEnabled && config.diagnosticsAdminLogins?.includes(user.github_login)
         ? '<p><a href="/admin/events">View recent diagnostics</a></p>' : "";
-      return page("Zircon settings", `<p>GitHub: ${escapeHtml(user.github_login)}</p><p>IRC is ${user.online ? "online" : "offline"}. Staying online records new channel activity and enables future mention events. ChatGPT can use go_offline and go_online when you ask it to change your presence.</p>${diagnosticsLink}<form method="post" action="/settings">
+      const subscriptions = store.listEventSubscriptions(user).map(subscription => `<li><strong>${escapeHtml(subscription.name)}</strong> ${escapeHtml(JSON.stringify(subscription.arguments))} to ${escapeHtml(new URL(subscription.url).origin)}${subscription.expiresAt ? ` until ${escapeHtml(subscription.expiresAt)}` : " (no expiry)"}
+        <form method="post" action="/settings/subscriptions/revoke"><input type="hidden" name="csrf" value="${csrf(config, cookieValue(request))}"><input type="hidden" name="id" value="${escapeHtml(subscription.id)}"><button>Revoke</button></form></li>`).join("");
+      return page("Zircon settings", `<p>GitHub: ${escapeHtml(user.github_login)}</p><p>IRC is ${user.online ? "online" : "offline"}. Staying online records new channel activity and delivers subscribed mention events. ChatGPT can use go_offline and go_online when you ask it to change your presence.</p>${diagnosticsLink}<form method="post" action="/settings">
         <input type="hidden" name="csrf" value="${csrf(config, cookieValue(request))}">
         <label>IRC network <select name="network_name">${networks}</select></label>
         <label>IRC nick <input name="nick" maxlength="31" value="${escapeHtml(user.nick)}" required></label>
         <label>IRC display name <input name="display_name" maxlength="32" value="${escapeHtml(user.display_name)}" required></label>
-        <fieldset><legend>Channels enabled in ChatGPT</legend>${options}</fieldset><button>Save</button></form>`);
+        <fieldset><legend>Channels enabled in ChatGPT</legend>${options}</fieldset><button>Save</button></form>
+        <h2>Event subscriptions</h2><p>ChatGPT can receive new mentions while IRC is online. Revoking a subscription stops future deliveries.</p><ul>${subscriptions || "<li>No active subscriptions</li>"}</ul>`);
+    }
+    if (path === "/settings/subscriptions/revoke" && request.method === "POST") {
+      const user = sessionUser(request);
+      const form = await request.formData();
+      if (!user || !requireCsrf(request, form)) return json({ error: "Forbidden" }, 403);
+      const id = String(form.get("id") ?? "");
+      if (!/^sub_[A-Za-z0-9_-]{32}$/.test(id) || !store.revokeEventSubscription(user, id)) {
+        return json({ error: "Unknown subscription" }, 404);
+      }
+      return redirect(`${base}/settings`);
     }
     if (path === "/settings" && request.method === "POST") {
       const user = sessionUser(request);

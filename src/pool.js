@@ -38,6 +38,11 @@ export class IrcPool {
     this.clients.delete(userId);
   }
 
+  connectionState(user) {
+    if (!user.online) return "offline";
+    return this.clients.get(user.id)?.connected ? "connected" : "connecting";
+  }
+
   async startAll() {
     for (const user of this.store.activeUsers()) {
       try { await this.forUser(user); }

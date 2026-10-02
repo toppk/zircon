@@ -4,60 +4,74 @@ const entry = { ...object({ network: string, channel: string, kind: string,
   time: string, observedAt: string, timestampSource: { type: "string", enum: ["server", "observed", "local"] },
   nick: string, text: string, target: { type: ["string", "null"] } }),
   required: ["network", "channel", "kind", "time", "observedAt", "timestampSource", "nick", "text", "target"] };
-const publicEntry = ({ id, ...activity }) => activity;
+const cursor = { type: ["string", "null"] };
 const tools = [
   {
     name: "list_channels", title: "List IRC channels",
-    description: "List the IRC network and channels this signed-in user has enabled in Zircon settings. Use this before reading a channel.",
+    description: "List the IRC network and channels this signed-in user has enabled in Zircon settings. online is the requested upstream presence; connection reports Zircon's local ZNC session, which may still be connecting. Use this before reading a channel.",
     inputSchema: object({}),
-    outputSchema: { ...object({ network: string, channels: { type: "array", items: string }, online: { type: "boolean" } }), required: ["network", "channels", "online"] },
+    outputSchema: { ...object({ network: string, channels: { type: "array", items: string }, online: { type: "boolean" },
+      connection: { type: "string", enum: ["offline", "connecting", "connected"] },
+      unread: { type: "object", additionalProperties: { type: "integer" } } }), required: ["network", "channels", "online", "connection", "unread"] },
     securitySchemes: [{ type: "oauth2", scopes: ["irc:read"] }],
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
-    name: "get_channel_messages", title: "Read IRC channel messages",
-    description: "Read timestamped IRC messages and channel activity retained for this user. Channel names include the leading #. Each entry identifies its network, nick, kind, event time, and whether the time came from IRC server-time or local observation.",
+    name: "read_unread", title: "Read unread IRC activity",
+    description: "Read the next unacknowledged batch in a channel, oldest arrival first. The same batch is returned until ack_messages succeeds. Each entry includes a mention flag, IRC event time, local observed time, and timestamp source. Use this for normal reading; then acknowledge only after processing it.",
     inputSchema: { ...object({ channel: string, limit: { type: "integer", minimum: 1, maximum: 200 } }), required: ["channel"] },
-    outputSchema: { ...object({ channel: string, network: string, activity: { type: "array", items: entry },
-      messages: { type: "array", items: entry } }), required: ["channel", "network", "activity", "messages"] },
+    outputSchema: { ...object({ channel: string, network: string, batchId: cursor, hasMore: { type: "boolean" },
+      entries: { type: "array", items: { ...entry, properties: { ...entry.properties, mention: { type: "boolean" } },
+        required: [...entry.required, "mention"] } } }), required: ["channel", "network", "batchId", "hasMore", "entries"] },
+    securitySchemes: [{ type: "oauth2", scopes: ["irc:read"] }],
+    annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
+  },
+  {
+    name: "ack_messages", title: "Acknowledge IRC messages",
+    description: "Acknowledge a read_unread batch after processing it. This advances that agent's channel cursor; retrying the same acknowledgement is safe.",
+    inputSchema: { ...object({ batch_id: string }), required: ["batch_id"] },
+    outputSchema: { ...object({ acknowledged: { type: "boolean" } }), required: ["acknowledged"] },
+    securitySchemes: [{ type: "oauth2", scopes: ["irc:read"] }],
+    annotations: { readOnlyHint: false, destructiveHint: false, openWorldHint: false },
+  },
+  {
+    name: "get_history", title: "Browse older IRC activity",
+    description: "Browse retained channel activity, newest first. Pass nextBefore for the next page. This does not change unread state.",
+    inputSchema: { ...object({ channel: string, before: string,
+      limit: { type: "integer", minimum: 1, maximum: 200 } }), required: ["channel"] },
+    outputSchema: { ...object({ network: string, channel: string, entries: { type: "array", items: entry },
+      nextBefore: cursor }), required: ["network", "channel", "entries", "nextBefore"] },
     securitySchemes: [{ type: "oauth2", scopes: ["irc:read"] }],
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
     name: "search_messages", title: "Search IRC messages",
-    description: "Search retained messages in this user's enabled channels. Optional UTC since and until timestamps narrow the period, such as yesterday.",
+    description: "Search retained messages in this user's enabled channels using a case-insensitive exact phrase. Results are newest first. Optional UTC since and until narrow the period; pass nextBefore to continue. Search does not change unread state.",
     inputSchema: { ...object({ query: { type: "string", minLength: 1, maxLength: 100 }, channel: string,
       since: { type: "string", format: "date-time" }, until: { type: "string", format: "date-time" },
-      limit: { type: "integer", minimum: 1, maximum: 100 } }), required: ["query"] },
-    outputSchema: { ...object({ messages: { type: "array", items: entry } }), required: ["messages"] },
+      before: string, limit: { type: "integer", minimum: 1, maximum: 100 } }), required: ["query"] },
+    outputSchema: { ...object({ messages: { type: "array", items: entry }, nextBefore: cursor }), required: ["messages", "nextBefore"] },
     securitySchemes: [{ type: "oauth2", scopes: ["irc:read"] }],
     annotations: { readOnlyHint: true, destructiveHint: false, openWorldHint: true },
   },
   {
-    name: "get_mentions", title: "Get IRC mentions",
-    description: "Return new retained channel messages mentioning this user's current IRC nick since the last check, then mark those mentions as seen.",
-    inputSchema: object({ limit: { type: "integer", minimum: 1, maximum: 100 } }),
-    outputSchema: { ...object({ mentions: { type: "array", items: entry } }), required: ["mentions"] },
-    securitySchemes: [{ type: "oauth2", scopes: ["irc:read"] }],
-    annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
-  },
-  {
     name: "send_message", title: "Send an IRC channel message",
-    description: "Post one message to an enabled IRC channel under this user's nick. This is a public write action: confirm the exact channel and text with the user before calling. A successful result means queued to ZNC, never confirmed delivered. Reuse the same idempotency_key on retries.",
+    description: "Post one message to an enabled IRC channel under this user's nick. This is a public write action: confirm the exact channel and text with the user, unless they gave standing authorization for replies in this channel and chat. A successful result means queued to ZNC, never confirmed delivered. Reuse the same idempotency_key on retries; messageId stays stable.",
     inputSchema: { ...object({ channel: string, text: { type: "string", minLength: 1, maxLength: 400 },
       idempotency_key: { type: "string", minLength: 8, maxLength: 128 } }), required: ["channel", "text", "idempotency_key"] },
     outputSchema: { ...object({ status: { type: "string", enum: ["queued", "pending"] }, network: string,
-      channel: string }), required: ["status", "network", "channel"] },
+      channel: string, messageId: string }), required: ["status", "network", "channel", "messageId"] },
     securitySchemes: [{ type: "oauth2", scopes: ["irc:write"] }],
     annotations: { readOnlyHint: false, destructiveHint: true, openWorldHint: true },
   },
   ...[false, true].map(online => ({
     name: online ? "go_online" : "go_offline", title: online ? "Go online on IRC" : "Go offline on IRC",
     description: online
-      ? "Reconnect this user's approved IRC network. Staying online lets Zircon record new channel activity and, when enabled, deliver mention events."
+      ? "Request reconnection of this user's approved IRC network. The result may say connecting while Zircon authenticates its local ZNC session; it does not prove an upstream channel join. Staying online lets Zircon record new activity and deliver subscribed mention events."
       : "Disconnect this user's upstream IRC network and stop receiving new activity or events. Retained history stays readable. Use only when the user wants to pause their IRC presence.",
     inputSchema: object({}),
-    outputSchema: { ...object({ online: { type: "boolean" }, network: string }), required: ["online", "network"] },
+    outputSchema: { ...object({ online: { type: "boolean" }, network: string,
+      connection: { type: "string", enum: ["offline", "connecting", "connected"] } }), required: ["online", "network", "connection"] },
     securitySchemes: [{ type: "oauth2", scopes: ["irc:write"] }],
     annotations: { readOnlyHint: false, destructiveHint: !online, openWorldHint: true },
   })),
@@ -71,12 +85,14 @@ const error = (id, code, message) => rpc(id, { error: { code, message } });
 const result = (id, data) => rpc(id, { result: data });
 const toolResult = (id, data) => result(id, { structuredContent: data, content: [{ type: "text", text: JSON.stringify(data) }] });
 
-export function createMcpHandler(config, store, pool) {
+export function createMcpHandler(config, store, pool, events) {
   const challenge = scope => `Bearer resource_metadata="${config.publicBaseUrl}/.well-known/oauth-protected-resource", scope="${scope}"`;
   return async request => {
     const bearer = /^Bearer ([A-Za-z0-9_-]+)$/.exec(request.headers.get("authorization") ?? "")?.[1];
-    const readUser = store.accessUser(bearer, "irc:read", config.publicBaseUrl);
-    const writeUser = store.accessUser(bearer, "irc:write", config.publicBaseUrl);
+    const readPrincipal = store.accessPrincipal(bearer, "irc:read", config.publicBaseUrl);
+    const writePrincipal = store.accessPrincipal(bearer, "irc:write", config.publicBaseUrl);
+    const readUser = readPrincipal?.user;
+    const writeUser = writePrincipal?.user;
     const user = readUser ?? writeUser;
     if (!user) return response({ error: "Unauthorized" }, 401, { "WWW-Authenticate": challenge("irc:read") });
     if (request.method !== "POST") return new Response(null, { status: 405, headers: { Allow: "POST" } });
@@ -86,13 +102,71 @@ export function createMcpHandler(config, store, pool) {
       return error(null, -32600, "Invalid request");
     }
     if (call.id === undefined) return new Response(null, { status: 202 });
+    if (call.method === "server/discover") return result(call.id, {
+      resultType: "complete", supportedVersions: ["2026-07-28"], capabilities: { tools: {}, events: {} },
+    });
     if (call.method === "initialize") return result(call.id, {
-      protocolVersion: "2025-06-18", capabilities: { tools: { listChanged: false } },
-      serverInfo: { name: "zircon-irc", title: "Zircon IRC", version: "0.4.1" },
-      instructions: "Use list_channels to see enabled channels and online status. Retained messages include IRC activity and timestamps. Staying online records new activity; going offline stops collection and future events. Sending an IRC message is public and irreversible, so confirm its destination and exact text with the user.",
+      protocolVersion: call.params?.protocolVersion === "2026-07-28" ? "2026-07-28" : "2025-06-18",
+      capabilities: { tools: { listChanged: false }, events: {} },
+      serverInfo: { name: "zircon-irc", title: "Zircon IRC", version: "0.5.0" },
+      instructions: "Use list_channels, then read_unread for normal channel reading. Process each batch and call ack_messages with its batchId; unacknowledged batches are returned again. get_history and search_messages do not change unread state. Staying online records new activity and delivers subscribed mention events. Sending an IRC message is public and irreversible; confirm its destination and text unless the user explicitly authorized automatic replies in this chat and channel.",
     });
     if (call.method === "ping") return result(call.id, {});
     if (call.method === "tools/list") return result(call.id, { tools });
+    if (call.method === "events/list") {
+      if (!readPrincipal) return response({ error: "Unauthorized" }, 401, { "WWW-Authenticate": challenge("irc:read") });
+      return result(call.id, { events: [{
+        name: "message.mention", description: "A message in a joined IRC channel addresses your current IRC nick. Zircon must stay online to deliver it.",
+        delivery: ["webhook"],
+        inputSchema: object({ network: string, channel: string, sender: string, keyword: string }),
+        payloadSchema: { ...object({ network: string, channel: string, sender: string, text: string,
+          kind: string, observedAt: string }),
+          required: ["network", "channel", "sender", "text", "kind", "observedAt"] },
+      }] });
+    }
+    if (call.method === "events/subscribe" || call.method === "events/unsubscribe") {
+      if (!readPrincipal) return response({ error: "Unauthorized" }, 401, { "WWW-Authenticate": challenge("irc:read") });
+      const params = call.params ?? {};
+      const filters = params.arguments ?? {};
+      const delivery = params.delivery ?? {};
+      const selected = JSON.parse(user.selected_channels);
+      const allowedFilter = key => ["network", "channel", "sender", "keyword"].includes(key);
+      if (params.name !== "message.mention" || !filters || typeof filters !== "object" || Array.isArray(filters) ||
+          Object.entries(filters).some(([key, value]) => !allowedFilter(key) || typeof value !== "string" ||
+            !value || value.length > 100) ||
+          (filters.network && filters.network !== user.network_name) ||
+          (filters.channel && !selected.some(channel => channel.toLowerCase() === filters.channel.toLowerCase())) ||
+          delivery.mode !== "webhook" || !validCallbackUrl(delivery.url)) {
+        return error(call.id, -32602, "Invalid event, filters, or callback URL");
+      }
+      if (call.method === "events/unsubscribe") {
+        store.removeEventSubscription(user, readPrincipal.clientId, params.name, filters, delivery.url);
+        return result(call.id, {});
+      }
+      const ttl = params.ttlMs === undefined ? 86_400_000 : params.ttlMs;
+      if ((ttl !== null && (!Number.isInteger(ttl) || ttl < 0)) ||
+          !validWebhookSecret(delivery.secret) || (params.cursor !== undefined && params.cursor !== null)) {
+        return error(call.id, -32602, "Invalid event lifetime, secret, or cursor");
+      }
+      const id = store.eventSubscriptionId(user, readPrincipal.clientId, params.name, filters, delivery.url);
+      const subscriptions = store.listEventSubscriptions(user);
+      if (!subscriptions.some(subscription => subscription.id === id) && subscriptions.length >= 20) {
+        return error(call.id, -32000, "Subscription limit reached");
+      }
+      if (!store.allowRate(`event-subscribe:${user.id}`, 12, 60_000) ||
+          !store.allowRate("event-subscribe:global", 100, 60_000)) {
+        return error(call.id, -32000, "Subscription rate limit reached");
+      }
+      let verified = false;
+      try { verified = await events.verify(delivery.url, delivery.secret, id); }
+      catch (cause) { console.error("Event callback verification failed:", cause.message); }
+      if (!verified) return rpc(call.id, { error: { code: -32015, message: "Callback verification failed",
+        data: { reason: "challenge_failed" } } });
+      const expiresAt = ttl === null ? null : Date.now() + Math.max(300_000, Math.min(ttl, 7 * 86_400_000));
+      store.saveEventSubscription(user, readPrincipal.clientId, params.name, filters, delivery.url, delivery.secret, expiresAt);
+      return result(call.id, { id, refreshBefore: expiresAt === null ? null : new Date(expiresAt).toISOString(),
+        cursor: null, truncated: false });
+    }
     if (call.method !== "tools/call") return error(call.id, -32601, "Method not found");
     const name = call.params?.name;
     const args = call.params?.arguments ?? {};
@@ -101,17 +175,30 @@ export function createMcpHandler(config, store, pool) {
     if (!(writeTool ? writeUser : readUser)) return response({ error: "Unauthorized" }, 401, { "WWW-Authenticate": challenge(writeTool ? "irc:write" : "irc:read") });
     if (name === "list_channels") {
       if (Object.keys(args).length) return error(call.id, -32602, "Invalid arguments");
-      return toolResult(call.id, { network: user.network_name, channels: JSON.parse(user.selected_channels), online: Boolean(user.online) });
+      const channels = JSON.parse(user.selected_channels);
+      return toolResult(call.id, { network: user.network_name, channels, online: Boolean(user.online),
+        connection: pool.connectionState?.(user) ?? (user.online ? "connecting" : "offline"),
+        unread: Object.fromEntries(channels.map(channel => [channel, store.unreadCount(user, readPrincipal.clientId, channel)])) });
     }
-    if (name === "get_channel_messages") {
+    if (name === "read_unread" || name === "get_history") {
       const channels = JSON.parse(user.selected_channels);
       const channel = typeof args.channel === "string" ? channels.find(item => item.toLowerCase() === args.channel.toLowerCase()) : null;
       const limit = args.limit ?? 50;
-      if (!channel || !Number.isInteger(limit) || limit < 1 || limit > 200 || Object.keys(args).some(key => !["channel", "limit"].includes(key))) {
+      if (!channel || !Number.isInteger(limit) || limit < 1 || limit > 200 ||
+          Object.keys(args).some(key => !["channel", "limit", ...(name === "get_history" ? ["before"] : [])].includes(key))) {
         return error(call.id, -32602, "Unknown channel or invalid limit");
       }
-      const activity = store.recentActivity(user, channel, limit).map(publicEntry);
-      return toolResult(call.id, { network: user.network_name, channel, activity, messages: activity.filter(item => ["message", "action"].includes(item.kind)) });
+      if (name === "read_unread") return toolResult(call.id, { network: user.network_name, channel,
+        ...store.readUnread(user, readPrincipal.clientId, channel, limit) });
+      const history = store.getHistory(user, channel, args.before, limit);
+      if (!history) return error(call.id, -32602, "Invalid history cursor");
+      return toolResult(call.id, { network: user.network_name, channel, ...history });
+    }
+    if (name === "ack_messages") {
+      if (typeof args.batch_id !== "string" || !/^batch_[A-Za-z0-9_-]{32,64}$/.test(args.batch_id) ||
+          Object.keys(args).some(key => key !== "batch_id")) return error(call.id, -32602, "Invalid batch ID");
+      if (!store.ackMessages(user, readPrincipal.clientId, args.batch_id)) return error(call.id, -32602, "Unknown batch");
+      return toolResult(call.id, { acknowledged: true });
     }
     if (name === "search_messages") {
       const channels = JSON.parse(user.selected_channels);
@@ -121,19 +208,14 @@ export function createMcpHandler(config, store, pool) {
       if (typeof args.query !== "string" || !args.query.trim() || args.query.length > 100 ||
           (args.channel !== undefined && !channel) || !validTime(args.since) || !validTime(args.until) ||
           !Number.isInteger(limit) || limit < 1 || limit > 100 ||
-          Object.keys(args).some(key => !["query", "channel", "since", "until", "limit"].includes(key))) {
+          Object.keys(args).some(key => !["query", "channel", "since", "until", "before", "limit"].includes(key))) {
         return error(call.id, -32602, "Invalid search arguments");
       }
-      return toolResult(call.id, { messages: store.searchActivity(user, channel ? [channel] : channels,
+      const page = store.searchPage(user, channel ? [channel] : channels,
         args.query.trim(), args.since ? new Date(args.since).toISOString() : null,
-        args.until ? new Date(args.until).toISOString() : null, limit).map(publicEntry) });
-    }
-    if (name === "get_mentions") {
-      const limit = args.limit ?? 50;
-      if (!Number.isInteger(limit) || limit < 1 || limit > 100 || Object.keys(args).some(key => key !== "limit")) {
-        return error(call.id, -32602, "Invalid limit");
-      }
-      return toolResult(call.id, { mentions: store.getMentions(user, JSON.parse(user.selected_channels), limit).map(publicEntry) });
+        args.until ? new Date(args.until).toISOString() : null, args.before, limit);
+      if (!page) return error(call.id, -32602, "Invalid search cursor");
+      return toolResult(call.id, page);
     }
     if (name === "send_message") {
       const selected = JSON.parse(user.selected_channels);
@@ -148,7 +230,8 @@ export function createMcpHandler(config, store, pool) {
       if (!user.online) return error(call.id, -32603, "IRC is offline; ask the user before going online");
       const reservation = store.reservePost(user, key, channel, message);
       if (reservation === "conflict") return error(call.id, -32602, "Idempotency key was used for a different message");
-      if (reservation !== "new") return toolResult(call.id, { status: reservation, network: user.network_name, channel });
+      const messageId = store.outgoingMessageId(user, key);
+      if (reservation !== "new") return toolResult(call.id, { status: reservation, network: user.network_name, channel, messageId });
       if (!store.allowRate(`post:${user.id}`, 20, 60_000) || !store.allowRate(`post:network:${user.network_name}`, 60, 60_000)) {
         store.cancelPost(user, key);
         return error(call.id, -32000, "Message rate limit reached");
@@ -166,14 +249,17 @@ export function createMcpHandler(config, store, pool) {
       const time = new Date().toISOString();
       store.recordActivity(user, { channel, kind: "message", time, observedAt: time,
         timestampSource: "local", nick: user.nick, text: message });
-      return toolResult(call.id, { status: "queued", network: user.network_name, channel });
+      return toolResult(call.id, { status: "queued", network: user.network_name, channel, messageId });
     }
     if (writeTool) {
       if (Object.keys(args).length) return error(call.id, -32602, "Invalid arguments");
       try { await pool.setOnline(user, name === "go_online"); }
       catch (cause) { console.error("MCP IRC presence change failed:", cause.message); return error(call.id, -32603, "IRC presence change unavailable"); }
-      return toolResult(call.id, { online: name === "go_online", network: user.network_name });
+      const online = name === "go_online";
+      return toolResult(call.id, { online, network: user.network_name,
+        connection: pool.connectionState?.({ ...user, online }) ?? (online ? "connecting" : "offline") });
     }
     return error(call.id, -32601, "Unknown tool");
   };
 }
+import { validCallbackUrl, validWebhookSecret } from "./events.js";

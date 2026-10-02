@@ -13,7 +13,7 @@ mcp_transport: Streamable HTTP, JSON response mode at /mcp
 max_request_body: 4k
 state:
   path: /var/lib/zircon
-  contents: SQLite users, GitHub identities, sessions, registered OAuth clients, hashed OAuth tokens, settings, channel activity and post audit
+  contents: SQLite users, GitHub identities, sessions, registered OAuth clients, hashed OAuth tokens, settings, channel activity, unread cursors and batches, event subscriptions and pending deliveries, and post audit
   backup: yes
 secrets:
   file: /var/lib/zircon-secrets/zircon.env
@@ -24,7 +24,7 @@ outbound_network:
   - 127.0.0.1:6667 (ZNC administration and per-user IRC clients)
   - irc.chonkbase.net:6697 (ZNC upstream over verified TLS)
 memory_estimate: Bun observed around 55 MB resident on ne2 before active user load; reserve 128 MB for Bun, and measure ZNC and Bun per active user before raising the 16-user cap
-scheduled_jobs: in-process hourly retention pruning and daily SQLite backup copy
+scheduled_jobs: in-process event delivery every 5 seconds, hourly retention pruning and daily SQLite backup copy
 public_irc_client_port: no
 znc_web_admin_public: no
 ```
@@ -63,7 +63,7 @@ services.zircon = {
 
 ## ChatGPT connector milestone
 
-Configure a custom MCP connection in ChatGPT developer mode with server URL `https://zircon.chooser.us/mcp`. Zircon answers unauthorized requests with a `WWW-Authenticate` link to `/.well-known/oauth-protected-resource`; OAuth server metadata is at `/.well-known/oauth-authorization-server`. ChatGPT can register at `/oauth/register` using its exact callback URL. Zircon accepts the documented `https://chatgpt.com/connector/oauth/{callback_id}` and `https://chatgpt.com/connector_platform_oauth_redirect` forms, and stores the exact URI per client. Registered clients must use S256 PKCE and `resource=https://zircon.chooser.us` throughout authorization and token exchange. Access tokens are opaque, hashed at rest, and bound to the resource. Read tools are `list_channels`, `get_channel_messages`, `search_messages`, and `get_mentions`. Write tools are `send_message`, `go_online`, and `go_offline`. They use `irc:read` and `irc:write` respectively.
+Configure a custom MCP connection in ChatGPT developer mode with server URL `https://zircon.chooser.us/mcp`. Zircon answers unauthorized requests with a `WWW-Authenticate` link to `/.well-known/oauth-protected-resource`; OAuth server metadata is at `/.well-known/oauth-authorization-server`. ChatGPT can register at `/oauth/register` using its exact callback URL. Zircon accepts the documented `https://chatgpt.com/connector/oauth/{callback_id}` and `https://chatgpt.com/connector_platform_oauth_redirect` forms, and stores the exact URI per client. Registered clients must use S256 PKCE and `resource=https://zircon.chooser.us` throughout authorization and token exchange. Access tokens are opaque, hashed at rest, and bound to the resource. Read tools are `list_channels`, `read_unread`, `ack_messages`, `get_history`, and `search_messages`. Write tools are `send_message`, `go_online`, and `go_offline`. They use `irc:read` and `irc:write` respectively. ChatGPT must rescan the connector after this tool change.
 
 The authorization server does **not** advertise RFC 9207 issuer identification, so ChatGPT should use a callback-ID-specific redirect URI as described in [OpenAI's MCP authentication guide](https://developers.openai.com/plugins/build/auth). If ChatGPT shows a different callback, inspect it before changing the server's allowlist. The legacy GPT Action endpoints and optional callback list remain for compatibility; they do not determine MCP redirects.
 
@@ -71,7 +71,7 @@ The consent and settings pages load `/ui.css` and `/logo.png` from Zircon. The a
 
 When `enableDiagnostics = true`, `GET /admin/events` returns recent IRC activity and metadata for MCP calls and IRC connection changes. It accepts `limit` (1–200) and optional ISO 8601 `since`. The owner can use a signed-in browser session if their GitHub login is in `diagnosticsAdminLogins`; automation can use `Authorization: Bearer <ADMIN_TOKEN>`. Keep that token out of chat and logs. Diagnostics store no OAuth tokens or tool arguments, are capped at 2000 records, and are pruned with the configured history retention. Channel text is returned from the existing per-user history store. Leave diagnostics disabled on deployments that do not need this view.
 
-The read tools return JSON directly, so this version does not need a long-lived stream, though HAProxy's 25-second timeout should be raised before any future streaming response. Automated tests cover registration, consent, PKCE, resource-bound tokens, history, posting and presence. The connector's initial read tools have been tested in ChatGPT developer mode; new write and history tools still need an owner test after deployment.
+The tools and event methods return JSON directly, so this version does not need a long-lived response stream. Raise HAProxy's 25-second server timeout if callback verification might take longer through a slow network. Automated tests cover registration, consent, PKCE, resource-bound tokens, acknowledged mailbox, history, posting, presence, subscription verification, signed deliveries and retries. The earlier read connector was tested in ChatGPT developer mode; the new tools and Events still need a live ChatGPT test after deployment.
 
 [OpenAI's migration guide](https://learn.chatgpt.com/docs/migrate-custom-gpts) says custom GPT Actions do not transfer to plugins. Its detailed retirement guidance is for Enterprise workspaces; availability for other plans must be checked for the owner. The [public plugin submission guide](https://developers.openai.com/plugins/deploy/submission) describes a universal directory shared by ChatGPT and Codex, but publication requires an approved plugin package and verified developer identity.
 
@@ -80,13 +80,13 @@ The read tools return JSON directly, so this version does not need a long-lived 
 1. The owner invites a GitHub username with `POST /admin/invite`, authenticated by `ADMIN_TOKEN`, and assigns allowed channels such as `#soup`.
 2. The owner sends the user the private MCP connection. The user connects it, signs in with GitHub, and consents to IRC read access. Zircon binds their GitHub numeric ID on first sign-in.
 3. The user visits `/settings` to select an approved IRC server, their own nickname, display name, and channels from the owner's invitation. Zircon updates their separate ZNC account through `controlpanel` and saves ZNC's configuration.
-4. Zircon stays attached to that user's ZNC account while online and records channel activity with event and observation timestamps. ChatGPT can read or search retained activity, check mentions, and ask to send a message. `send_message` reports only that the line was queued to ZNC. `go_offline` disconnects the upstream IRC network and stops new collection; `go_online` resumes it.
+4. Zircon stays attached to that user's ZNC account while online and records channel activity with event and observation timestamps. ChatGPT reads acknowledged unread batches, browses history or searches, and may subscribe to mention events. The user can revoke subscriptions in `/settings`. `send_message` reports only that the line was queued to ZNC. `go_offline` disconnects the upstream IRC network and stops new collection and event delivery; `go_online` resumes it.
 
 ## Planned work
 
 - Measure live history retention, replay behavior, Bun/ZNC memory per user and storage per channel per day on ne2. Channel activity is stored per user in SQLite, but these capacity figures are not yet measured.
-- Add MCP Events after history, keeping read tools independent. [OpenAI's Events guide](https://developers.openai.com/plugins/build/mcp-events) requires MCP 2.0 (`2026-07-28`), `server/discover`, and `events/list`, `events/subscribe`, `events/unsubscribe` on `/mcp`. Start with `message.mention`, then `message.channel`, with network/channel/sender/keyword filters enforced before delivery. Persist subscriptions with TTL and per-user channel access; expose them in `/settings` for revocation.
-- Verify each HTTPS webhook callback before activation. Re-resolve destinations at connection time and reject non-public addresses and redirects. Require a valid `whsec_` secret and Standard Webhooks signatures. Deliver one event per request from a bounded background queue, retry transient failures with a stable event ID and fresh signature, and stop on 410/413. Suppress Zircon's own messages and rate-limit each subscription to prevent IRC bot loops. The planned queue cap is 32 payloads of at most 256 KiB (8 MiB payload budget) with two concurrent deliveries; allow roughly 12 MiB extra resident memory for the worker until measured. Events send channel text to OpenAI, so disclose that in `/privacy` before enabling them. OpenAI currently limits Events to Work chats on web, Work chats on desktop with Cloud, and dots, subject to workspace controls; the tools must remain useful without Events.
+- Add `message.channel` and richer event filters after the first mention-event path is proven in ChatGPT. [OpenAI's Events guide](https://developers.openai.com/plugins/build/mcp-events) currently limits Events to Work chats on web, Work chats on desktop with Cloud, and dots, subject to workspace controls; the tools work without Events.
+- Measure the event worker on ne2. It sends one delivery at a time, checks the queue every 5 seconds, drains at most 10 per pass, and caps queued deliveries at 1000. IRC line limits make typical payloads much smaller than the 256 KiB protocol ceiling; reserve about 4 MiB extra Bun memory for the worker until measured. Subscriptions store callback URLs and `whsec_` signing secrets in the private SQLite state. No additional host environment secret is needed. The `/privacy` page describes event text sent to OpenAI.
 - Test `send_message`, `go_online` and `go_offline` through ChatGPT after deployment. MCP posts require an idempotency key, are limited to 20 per user and 60 per network per minute, and report queued rather than delivered.
 - Replace invite-only onboarding with bounded self-service signup, owner-approved channel opt-in, abuse controls and per-user/per-network kill switches. Keep `MAX_USERS=16` on ne2 until memory and ZNC cost per active user are measured.
 - Add self-service deletion, a documented retention policy, an updated privacy page, terms, support contact and reviewer test account. Current `/privacy` describes the current data only.

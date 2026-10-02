@@ -42,9 +42,9 @@ change, Zircon keeps your settings and asks you to save again shortly.
 
 ## 4. Use Zircon
 
-Ask ChatGPT which channels you can access, what happened recently in one of them, or to search retained messages. Each entry includes a timestamp and relevant channel activity. You can also check mentions or ask ChatGPT to send a message; confirm its destination and text before posting. Zircon can queue a message to ZNC but cannot promise delivery to the IRC network.
+Ask ChatGPT which channels you can access, to read the next unread batch, or to search retained messages. Each entry includes a timestamp and relevant channel activity; mentions carry a flag. ChatGPT acknowledges a batch after processing it. You can also ask to browse older history or send a message; confirm its destination and text before posting unless you have given standing authorization for replies in that chat and channel. Zircon can queue a message to ZNC but cannot promise delivery to the IRC network.
 
-Your IRC network stays online by default so Zircon can record new messages. Ask ChatGPT to use `go_offline` if you want to disconnect, and `go_online` to resume. While offline, existing history remains readable but new channel activity and future Events cannot arrive.
+Your IRC network stays online by default so Zircon can record new messages and deliver subscribed mention events. Ask ChatGPT to use `go_offline` if you want to disconnect, and `go_online` to resume. While offline, existing history remains readable but new channel activity and events cannot arrive. You can review and revoke event subscriptions in `/settings`.
 
 ::: note
 People on the IRC network see your nick, channels and messages as with any

@@ -1,10 +1,11 @@
 import { expect, test } from "bun:test";
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import net from "node:net";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHandler } from "../src/api.js";
+import { EventService, publicIp, validCallbackUrl, validWebhookSecret, webhookSignature } from "../src/events.js";
 import { IrcClient, parseIrcLine } from "../src/irc.js";
 import { IrcPool } from "../src/pool.js";
 import { Store } from "../src/store.js";
@@ -208,26 +209,30 @@ test("MCP discovery, OAuth, history, posting and presence tools", async () => {
       Authorization: `Bearer ${tokens.access_token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }) });
     expect((await slashList.json()).result.tools.map(tool => tool.name)).toEqual(listed.map(tool => tool.name));
-    expect(listed.map(tool => tool.name)).toEqual(["list_channels", "get_channel_messages", "search_messages", "get_mentions", "send_message", "go_offline", "go_online"]);
+    expect(listed.map(tool => tool.name)).toEqual(["list_channels", "read_unread", "ack_messages", "get_history", "search_messages", "send_message", "go_offline", "go_online"]);
     expect(listed.every(tool => tool.outputSchema && ["readOnlyHint", "destructiveHint", "openWorldHint"].every(key => typeof tool.annotations?.[key] === "boolean"))).toBe(true);
     expect(listed.find(tool => tool.name === "send_message").annotations.destructiveHint).toBe(true);
     expect((await (await mcp("tools/call", { name: "list_channels", arguments: {} })).json()).result.structuredContent.channels).toEqual(["#soup"]);
-    const history = (await (await mcp("tools/call", { name: "get_channel_messages", arguments: { channel: "#soup" } })).json()).result.structuredContent;
-    expect(history.activity.map(item => item.kind)).toEqual(["join", "message"]);
-    expect(history.messages[0].text).toBe("hello alice");
-    expect(history.messages[0].time).toBe("2026-10-01T00:01:00.000Z");
-    expect(history.messages[0].timestampSource).toBe("server");
-    expect(history.messages[0].id).toBeUndefined();
+    const unread = (await (await mcp("tools/call", { name: "read_unread", arguments: { channel: "#soup" } })).json()).result.structuredContent;
+    expect(unread.entries.map(item => item.kind)).toEqual(["join", "message"]);
+    expect(unread.entries[1].text).toBe("hello alice");
+    expect(unread.entries[1].time).toBe("2026-10-01T00:01:00.000Z");
+    expect(unread.entries[1].timestampSource).toBe("server");
+    expect(unread.entries[1].mention).toBe(true);
+    expect(unread.entries[1].id).toBeUndefined();
+    expect((await (await mcp("tools/call", { name: "read_unread", arguments: { channel: "#soup", limit: 1 } })).json()).result.structuredContent.batchId).toBe(unread.batchId);
+    const history = (await (await mcp("tools/call", { name: "get_history", arguments: { channel: "#soup" } })).json()).result.structuredContent;
+    expect(history.entries).toHaveLength(2);
     expect((await (await mcp("tools/call", { name: "search_messages", arguments: { query: "hello" } })).json()).result.structuredContent.messages[0].nick).toBe("bob");
-    expect((await (await mcp("tools/call", { name: "get_mentions", arguments: {} })).json()).result.structuredContent.mentions).toHaveLength(1);
-    expect((await (await mcp("tools/call", { name: "get_mentions", arguments: {} })).json()).result.structuredContent.mentions).toHaveLength(0);
-    expect((await (await mcp("tools/call", { name: "get_channel_messages", arguments: { channel: "#other" } })).json()).error.code).toBe(-32602);
+    expect((await (await mcp("tools/call", { name: "read_unread", arguments: { channel: "#other" } })).json()).error.code).toBe(-32602);
+    expect((await (await mcp("tools/call", { name: "ack_messages", arguments: { batch_id: unread.batchId } })).json()).result.structuredContent.acknowledged).toBe(true);
+    expect((await (await mcp("tools/call", { name: "read_unread", arguments: { channel: "#soup" } })).json()).result.structuredContent.entries).toHaveLength(0);
     const readOnly = store.issueTokens(user.id, client.client_id, "irc:read", base);
     const outgoing = { channel: "#soup", text: "hello room", idempotency_key: "sample-key-123" };
     expect((await mcp("tools/call", { name: "send_message", arguments: outgoing }, readOnly.access_token)).status).toBe(401);
     const queued = (await (await mcp("tools/call", { name: "send_message", arguments: outgoing })).json()).result.structuredContent;
-    expect(queued).toEqual({ status: "queued", network: "chonkbase", channel: "#soup" });
-    expect((await (await mcp("tools/call", { name: "send_message", arguments: outgoing })).json()).result.structuredContent.status).toBe("queued");
+    expect(queued).toEqual({ status: "queued", network: "chonkbase", channel: "#soup", messageId: store.outgoingMessageId(user, outgoing.idempotency_key) });
+    expect((await (await mcp("tools/call", { name: "send_message", arguments: outgoing })).json()).result.structuredContent).toEqual(queued);
     expect(sent).toEqual([["#soup", "hello room"]]);
     expect(store.db.query("SELECT count(*) AS count FROM audit").get().count).toBe(1);
     expect((await (await mcp("tools/call", { name: "send_message", arguments: { ...outgoing, text: "different" } })).json()).error.code).toBe(-32602);
@@ -340,7 +345,7 @@ test("channel history survives restart, enforces user scope and retention, and p
     store.recordActivity(alice, { channel: "#soup", kind: "message", time, observedAt: time,
       timestampSource: "server", nick: "someone", text: "hello alice" });
     store.recordActivity(alice, { channel: "#soup", kind: "message", time: "2000-01-01T00:00:00.000Z",
-      observedAt: time, timestampSource: "observed", nick: "old", text: "stale" });
+      observedAt: "2000-01-01T00:00:00.000Z", timestampSource: "observed", nick: "old", text: "stale" });
     store.setOnline(alice.id, false);
   } finally { store.close(); }
   const reopened = new Store(path, { historyRetentionDays: 7, historyMaxPerChannel: 100 });
@@ -352,6 +357,152 @@ test("channel history survives restart, enforces user scope and retention, and p
     reopened.pruneActivity();
     expect(reopened.recentActivity(reopened.userById(alice.id), "#soup", 10).map(item => item.text)).toEqual(["hello alice"]);
   } finally { reopened.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("unread batches survive restart, isolate OAuth clients, and drain overflow only after acknowledgement", () => {
+  const dir = mkdtempSync(join(tmpdir(), "zircon-mailbox-"));
+  const path = join(dir, "zircon.sqlite");
+  let store = new Store(path);
+  const user = store.invite("alice", ["#soup"], "chonkbase");
+  for (let index = 0; index < 5; index++) {
+    const time = new Date(Date.now() + index).toISOString();
+    store.recordActivity(user, { channel: "#soup", kind: "message", time, observedAt: time,
+      timestampSource: "server", nick: "bob", text: `message ${index}` });
+  }
+  const first = store.readUnread(user, "agent-a", "#soup", 2);
+  expect(first.entries.map(item => item.text)).toEqual(["message 0", "message 1"]);
+  expect(first.hasMore).toBe(true);
+  expect(store.unreadCount(user, "agent-a", "#soup")).toBe(5);
+  expect(store.readUnread(user, "agent-b", "#soup", 1).entries[0].text).toBe("message 0");
+  store.close();
+  store = new Store(path);
+  try {
+    const restored = store.userById(user.id);
+    expect(store.readUnread(restored, "agent-a", "#soup", 200)).toEqual(first);
+    expect(store.getHistory(restored, "#soup", null, 2).entries.map(item => item.text)).toEqual(["message 4", "message 3"]);
+    const page = store.getHistory(restored, "#soup", null, 2);
+    expect(store.getHistory(restored, "#soup", page.nextBefore, 2).entries.map(item => item.text)).toEqual(["message 2", "message 1"]);
+    expect(store.getHistory(restored, "#soup", "invalid", 2)).toBeNull();
+    const search = store.searchPage(restored, ["#soup"], "message", null, null, null, 2);
+    expect(search.messages.map(item => item.text)).toEqual(["message 4", "message 3"]);
+    expect(store.searchPage(restored, ["#soup"], "message", null, null, search.nextBefore, 2).messages.map(item => item.text)).toEqual(["message 2", "message 1"]);
+    expect(store.readUnread(restored, "agent-a", "#soup", 2)).toEqual(first);
+    expect(store.ackMessages(restored, "agent-b", first.batchId)).toBe(false);
+    expect(store.ackMessages(restored, "agent-a", first.batchId)).toBe(true);
+    expect(store.ackMessages(restored, "agent-a", first.batchId)).toBe(true);
+    expect(store.readUnread(restored, "agent-a", "#soup", 2).entries.map(item => item.text)).toEqual(["message 2", "message 3"]);
+    expect(store.unreadCount(restored, "agent-a", "#soup")).toBe(3);
+  } finally { store.close(); }
+});
+
+test("MCP mention subscriptions verify callbacks, persist, filter, sign and unsubscribe", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "zircon-events-"));
+  const path = join(dir, "zircon.sqlite");
+  let store = new Store(path);
+  const secret = `whsec_${randomBytes(32).toString("base64")}`;
+  const callbackUrl = "https://hooks.example.com/mcp-events";
+  const deliveries = [];
+  const transport = async (_url, request) => {
+    const body = JSON.parse(request.body);
+    deliveries.push(request);
+    return body.type === "verification" ? { status: 200, body: JSON.stringify({ challenge: body.challenge }) } :
+      { status: 204, body: "" };
+  };
+  const events = new EventService(store, transport);
+  const user = store.invite("alice", ["#soup"], "chonkbase");
+  const token = store.issueTokens(user.id, "agent-a", "irc:read", base).access_token;
+  let handle = createHandler(config, {}, store, async () => null, events);
+  const rpc = (method, params = {}) => handle(new Request(`${base}/mcp`, { method: "POST",
+    headers: { Authorization: `Bearer ${token}`, "Content-Type": "application/json" },
+    body: JSON.stringify({ jsonrpc: "2.0", id: 1, method, params }) })).then(response => response.json());
+  const args = { channel: "#soup", keyword: "soup" };
+  const delivery = { mode: "webhook", url: callbackUrl, secret };
+  try {
+    expect(validCallbackUrl("https://127.0.0.1/callback")).toBe(false);
+    expect(validCallbackUrl("http://hooks.example.com/callback")).toBe(false);
+    expect(validWebhookSecret(secret)).toBe(true);
+    expect(validWebhookSecret("whsec_bad")).toBe(false);
+    expect((await rpc("server/discover")).result.supportedVersions).toContain("2026-07-28");
+    expect((await rpc("events/list")).result.events[0].name).toBe("message.mention");
+    expect((await rpc("events/subscribe", { name: "message.mention", arguments: { channel: "#other" }, delivery })).error.code).toBe(-32602);
+    const subscribed = (await rpc("events/subscribe", { name: "message.mention", arguments: args,
+      delivery, ttlMs: null })).result;
+    expect(subscribed.refreshBefore).toBeNull();
+    expect(subscribed.id).toStartWith("sub_");
+    expect(deliveries[0].headers["webhook-signature"]).toBe(webhookSignature(secret,
+      deliveries[0].headers["webhook-id"], deliveries[0].headers["webhook-timestamp"], deliveries[0].body));
+    const time = new Date().toISOString();
+    const activity = (nick, text, channel = "#soup") => store.recordActivity(user, {
+      channel, kind: "message", time: new Date(Date.now() + Math.random() * 1000).toISOString(),
+      observedAt: time, timestampSource: "server", nick, text });
+    activity("bob", "hello alice");
+    activity("alice", "alice likes soup");
+    activity("bob", "hello alice, soup is ready");
+    expect(store.db.query("SELECT count(*) AS count FROM event_deliveries").get().count).toBe(1);
+    store.close();
+    store = new Store(path);
+    events.store = store;
+    handle = createHandler(config, {}, store, async () => null, events);
+    await events.drain();
+    const sent = JSON.parse(deliveries.at(-1).body);
+    expect(sent.name).toBe("message.mention");
+    expect(sent.data.text).toBe("hello alice, soup is ready");
+    expect(sent.data.channel).toBe("#soup");
+    expect(deliveries.at(-1).headers["webhook-id"]).toBe(sent.eventId);
+    expect(store.db.query("SELECT count(*) AS count FROM event_deliveries").get().count).toBe(0);
+    expect((await rpc("events/unsubscribe", { name: "message.mention", arguments: args,
+      delivery: { mode: "webhook", url: callbackUrl } })).result).toEqual({});
+    expect(store.listEventSubscriptions(store.userById(user.id))).toHaveLength(0);
+    await rpc("events/subscribe", { name: "message.mention", arguments: args, delivery });
+    const session = store.createSession(user.id);
+    const cookie = `__Host-zircon_session=${session}`;
+    const settings = await handle(new Request(`${base}/settings`, { headers: { Cookie: cookie } }));
+    const html = await settings.text();
+    expect(html).toContain("Event subscriptions");
+    const csrf = html.match(/name="csrf" value="([^"]+)"/)[1];
+    const revoked = await handle(new Request(`${base}/settings/subscriptions/revoke`, { method: "POST",
+      headers: { Cookie: cookie, Origin: base, "Content-Type": "application/x-www-form-urlencoded" },
+      body: new URLSearchParams({ csrf, id: subscribed.id }) }));
+    expect(revoked.status).toBe(303);
+    expect(store.listEventSubscriptions(store.userById(user.id))).toHaveLength(0);
+  } finally { store.close(); }
+});
+
+test("event worker retries transient failures with one ID and drops a gone subscription", async () => {
+  const store = new Store(":memory:");
+  const user = store.invite("alice", ["#soup"], "chonkbase");
+  const secret = `whsec_${randomBytes(32).toString("base64")}`;
+  const id = store.saveEventSubscription(user, "agent-a", "message.mention", { channel: "#soup" },
+    "https://hooks.example.com/callback", secret, null);
+  const authorization = store.issueTokens(user.id, "agent-a", "irc:read", base);
+  const sent = [];
+  const service = new EventService(store, async (_url, request) => {
+    sent.push(request);
+    return { status: sent.length === 1 ? 503 : 410, body: "" };
+  });
+  try {
+    expect(publicIp("127.0.0.1")).toBe(false);
+    expect(publicIp("169.254.1.1")).toBe(false);
+    expect(publicIp("192.0.0.9")).toBe(false);
+    expect(publicIp("8.8.8.8")).toBe(true);
+    expect(publicIp("::1")).toBe(false);
+    const time = new Date().toISOString();
+    store.recordActivity(user, { channel: "#soup", kind: "message", time, observedAt: time,
+      timestampSource: "server", nick: "bob", text: "alice: hello" });
+    await service.drain();
+    expect(sent).toHaveLength(1);
+    expect(store.db.query("SELECT attempts FROM event_deliveries").get().attempts).toBe(1);
+    store.db.query("UPDATE event_deliveries SET next_attempt_at=0").run();
+    await service.drain();
+    expect(sent).toHaveLength(2);
+    expect(sent[0].headers["webhook-id"]).toBe(sent[1].headers["webhook-id"]);
+    expect(store.db.query("SELECT count(*) AS count FROM event_deliveries").get().count).toBe(0);
+    expect(store.db.query("SELECT id FROM event_subscriptions WHERE id=?").get(id)).toBeNull();
+    expect(store.hasEventAccess(user.id, "agent-a")).toBe(true);
+    store.revokeToken(authorization.access_token, "agent-a");
+    store.revokeToken(authorization.refresh_token, "agent-a");
+    expect(store.hasEventAccess(user.id, "agent-a")).toBe(false);
+  } finally { store.close(); }
 });
 
 test("ZNC controlpanel provisions dynamically over one IRC listener", async () => {
