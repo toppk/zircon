@@ -21,7 +21,7 @@ ZNC
 
 SQLite
 : `zircon.sqlite` under `/var/lib/zircon` holds users, GitHub identities,
-  browser sessions, hashed OAuth tokens, settings, channel history and the post audit. Zircon
+  browser and agent sessions, hashed OAuth tokens, settings, channel history and the post audit. Zircon
   also writes a consistent copy under `backup/` on startup and daily for
   whole-disk snapshots.
 
@@ -55,7 +55,7 @@ It then runs `SaveConfig`. ZNC must run with `mutable = true` so that
 saved configuration survives a restart; [Deployment](deploy.html) covers
 the one-time migration.
 
-Zircon then attaches to the user's ZNC account as an IRC client and stores timestamped channel activity in SQLite. MCP reads acknowledged unread batches, browses or searches history, queues messages, and takes a user online or offline. Its first event subscription sends matching nick mentions to ChatGPT through signed callbacks while the user stays online. Public onboarding remains planned.
+Zircon then attaches to the user's ZNC account as an IRC client and stores timestamped channel activity in SQLite. One human user has one ZNC presence shared by all their agents. Each agent obtains its own mailbox session from `see_account_information` and can acknowledge unread activity without moving another agent's cursor. `read_history` also supports recent and last-hour reads that do not touch any cursor. `go_offline` disconnects the human account for every agent; `go_online` reconnects it. ChatGPT's event host can separately subscribe a chat to signed nick-mention callbacks while the account stays online. Public onboarding remains planned.
 
 ## Channels: granted, then enabled
 

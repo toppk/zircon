@@ -46,6 +46,13 @@ export function webhookSignature(secret, id, timestamp, body) {
   return `v1,${createHmac("sha256", key).update(`${id}.${timestamp}.${body}`).digest("base64")}`;
 }
 
+export function pinnedLookup(address) {
+  return (_host, options, callback) => {
+    if (options.all) callback(null, [{ address: address.address, family: address.family }]);
+    else callback(null, address.address, address.family);
+  };
+}
+
 export async function sendHttps(urlString, { body, headers }) {
   if (!validCallbackUrl(urlString)) throw new Error("invalid_callback_url");
   const url = new URL(urlString);
@@ -59,7 +66,7 @@ export async function sendHttps(urlString, { body, headers }) {
   return new Promise((resolve, reject) => {
     const request = https.request(url, {
       method: "POST", agent: false, servername: url.hostname, rejectUnauthorized: true,
-      lookup: (_host, _options, callback) => callback(null, address.address, address.family),
+      lookup: pinnedLookup(address),
       headers: { ...headers, "Content-Length": Buffer.byteLength(body) },
     }, response => {
       const chunks = [];

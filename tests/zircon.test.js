@@ -1,11 +1,12 @@
 import { expect, test } from "bun:test";
 import { createHash, randomBytes } from "node:crypto";
 import net from "node:net";
+import https from "node:https";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createHandler } from "../src/api.js";
-import { EventService, publicIp, validCallbackUrl, validWebhookSecret, webhookSignature } from "../src/events.js";
+import { EventService, pinnedLookup, publicIp, validCallbackUrl, validWebhookSecret, webhookSignature } from "../src/events.js";
 import { IrcClient, parseIrcLine } from "../src/irc.js";
 import { IrcPool } from "../src/pool.js";
 import { Store } from "../src/store.js";
@@ -209,11 +210,25 @@ test("MCP discovery, OAuth, history, posting and presence tools", async () => {
       Authorization: `Bearer ${tokens.access_token}`, "Content-Type": "application/json" },
       body: JSON.stringify({ jsonrpc: "2.0", id: 2, method: "tools/list" }) });
     expect((await slashList.json()).result.tools.map(tool => tool.name)).toEqual(listed.map(tool => tool.name));
-    expect(listed.map(tool => tool.name)).toEqual(["list_channels", "read_unread", "ack_messages", "get_history", "search_messages", "send_message", "get_message_status", "get_irc_status", "get_tool_diag", "go_offline", "go_online"]);
+    expect(listed.map(tool => tool.name)).toEqual(["see_account_information", "go_online", "read_history", "ack_messages", "search_history", "send_message", "get_message_status", "go_offline"]);
     expect(listed.every(tool => tool.outputSchema && ["readOnlyHint", "destructiveHint", "openWorldHint"].every(key => typeof tool.annotations?.[key] === "boolean"))).toBe(true);
     expect(listed.find(tool => tool.name === "send_message").annotations.destructiveHint).toBe(true);
-    expect((await (await mcp("tools/call", { name: "list_channels", arguments: {} })).json()).result.structuredContent.channels).toEqual(["#soup"]);
-    const unread = (await (await mcp("tools/call", { name: "read_unread", arguments: { channel: "#soup" } })).json()).result.structuredContent;
+    const account = (await (await mcp("tools/call", { name: "see_account_information", arguments: {} })).json()).result.structuredContent;
+    expect(account.channels.map(item => item.channel)).toEqual(["#soup"]);
+    expect(account.nick).toBe("alice");
+    expect(account.server).toBe("irc.chonkbase.net:6697");
+    expect(account.mentionEvents.state).toBe("not_subscribed");
+    expect(account.mentionEvents.nextStep).toContain("events/subscribe");
+    const sessionId = account.sessionId;
+    expect(sessionId).toStartWith("agent_");
+    expect(typeof account.sessionCreatedAt).toBe("string");
+    expect(account.createdAt).toBeUndefined();
+    const otherSession = (await (await mcp("tools/call", { name: "see_account_information", arguments: {} })).json()).result.structuredContent.sessionId;
+    expect(otherSession).not.toBe(sessionId);
+    const foreignClient = store.issueTokens(user.id, "different-client", "irc:read", base);
+    expect((await (await mcp("tools/call", { name: "see_account_information", arguments: { session_id: sessionId } }, foreignClient.access_token)).json()).error.code).toBe(-32602);
+    expect((await (await mcp("tools/call", { name: "list_channels", arguments: {} })).json()).error.code).toBe(-32601);
+    const unread = (await (await mcp("tools/call", { name: "read_history", arguments: { channel: "#soup", mode: "unread", session_id: sessionId } })).json()).result.structuredContent;
     expect(unread.entries.map(item => item.kind)).toEqual(["join", "message"]);
     expect(unread.entries[1].text).toBe("hello alice");
     expect(unread.entries[1].time).toBe("2026-10-01T00:01:00.000Z");
@@ -222,38 +237,44 @@ test("MCP discovery, OAuth, history, posting and presence tools", async () => {
     expect(unread.entries[1].entryId).toStartWith("entry_");
     expect(unread.entries[1].messageId).toBeNull();
     expect(unread.entries[1].id).toBeUndefined();
-    expect((await (await mcp("tools/call", { name: "read_unread", arguments: { channel: "#soup", limit: 1 } })).json()).result.structuredContent.batchId).toBe(unread.batchId);
-    const history = (await (await mcp("tools/call", { name: "get_history", arguments: { channel: "#soup" } })).json()).result.structuredContent;
+    expect((await (await mcp("tools/call", { name: "read_history", arguments: { channel: "#soup", mode: "unread", session_id: sessionId, limit: 1 } })).json()).result.structuredContent.batchId).toBe(unread.batchId);
+    const history = (await (await mcp("tools/call", { name: "read_history", arguments: { channel: "#soup", mode: "recent" } })).json()).result.structuredContent;
     expect(history.entries).toHaveLength(2);
-    expect((await (await mcp("tools/call", { name: "search_messages", arguments: { query: "hello" } })).json()).result.structuredContent.messages[0].nick).toBe("bob");
-    expect((await (await mcp("tools/call", { name: "read_unread", arguments: { channel: "#other" } })).json()).error.code).toBe(-32602);
-    expect((await (await mcp("tools/call", { name: "ack_messages", arguments: { batch_id: unread.batchId } })).json()).result.structuredContent.acknowledged).toBe(true);
-    expect((await (await mcp("tools/call", { name: "read_unread", arguments: { channel: "#soup" } })).json()).result.structuredContent.entries).toHaveLength(0);
+    expect((await (await mcp("tools/call", { name: "search_history", arguments: { query: "hello" } })).json()).result.structuredContent.messages[0].nick).toBe("bob");
+    expect((await (await mcp("tools/call", { name: "read_history", arguments: { channel: "#other", mode: "recent" } })).json()).error.code).toBe(-32602);
+    expect((await (await mcp("tools/call", { name: "ack_messages", arguments: { session_id: otherSession, batch_id: unread.batchId } })).json()).error.code).toBe(-32602);
+    expect((await (await mcp("tools/call", { name: "ack_messages", arguments: { session_id: sessionId, batch_id: unread.batchId } })).json()).result.structuredContent.acknowledged).toBe(true);
+    expect((await (await mcp("tools/call", { name: "read_history", arguments: { channel: "#soup", mode: "unread", session_id: sessionId } })).json()).result.structuredContent.entries).toHaveLength(0);
+    expect((await (await mcp("tools/call", { name: "read_history", arguments: { channel: "#soup", mode: "unread", session_id: otherSession } })).json()).result.structuredContent.entries).toHaveLength(2);
     const readOnly = store.issueTokens(user.id, client.client_id, "irc:read", base);
     const outgoing = { channel: "#soup", text: "hello room", idempotency_key: "sample-key-123" };
     expect((await mcp("tools/call", { name: "send_message", arguments: outgoing }, readOnly.access_token)).status).toBe(401);
     const queued = (await (await mcp("tools/call", { name: "send_message", arguments: outgoing })).json()).result.structuredContent;
     expect(queued).toEqual({ status: "queued", network: "chonkbase", channel: "#soup", messageId: store.outgoingMessageId(user, outgoing.idempotency_key) });
-    expect((await (await mcp("tools/call", { name: "get_message_status", arguments: { message_id: queued.messageId } })).json()).result.structuredContent.status).toBe("queued");
-    expect(store.searchPage(user, ["#soup"], "hello room", null, null).messages).toHaveLength(0);
+    const queuedStatus = (await (await mcp("tools/call", { name: "get_message_status", arguments: { message_id: queued.messageId } })).json()).result.structuredContent;
+    expect(queuedStatus.status).toBe("queued");
+    expect(queuedStatus.entryId).toStartWith("entry_");
+    const localEntries = store.searchPage(user, ["#soup"], "hello room", null, null).messages;
+    expect(localEntries).toHaveLength(1);
+    expect(localEntries[0].entryId).toBe(queuedStatus.entryId);
+    expect(localEntries[0].timestampSource).toBe("local");
     const echoTime = new Date().toISOString();
     store.recordActivity(user, { channel: "#soup", kind: "message", time: echoTime, observedAt: echoTime,
       timestampSource: "server", nick: "alice", text: "hello room" });
     const echoed = (await (await mcp("tools/call", { name: "get_message_status", arguments: { message_id: queued.messageId } })).json()).result.structuredContent;
     expect(echoed.status).toBe("echoed");
-    expect(echoed.entryId).toStartWith("entry_");
+    expect(echoed.entryId).toBe(queuedStatus.entryId);
     expect(store.searchPage(user, ["#soup"], "hello room", null, null).messages).toHaveLength(1);
     expect(store.searchPage(user, ["#soup"], "hello room", null, null).messages[0].messageId).toBe(queued.messageId);
-    const status = (await (await mcp("tools/call", { name: "get_irc_status", arguments: {} })).json()).result.structuredContent;
+    expect(store.searchPage(user, ["#soup"], "hello room", null, null).messages[0].timestampSource).toBe("server");
+    const status = (await (await mcp("tools/call", { name: "see_account_information", arguments: { session_id: sessionId } })).json()).result.structuredContent;
     expect(status.nick).toBe("alice");
     expect(status.upstreamConnected).toBeNull();
     expect(status.lastReceived.entryId).toBe(echoed.entryId);
-    const diag = (await (await mcp("tools/call", { name: "get_tool_diag", arguments: {} })).json()).result.structuredContent;
-    expect(diag.version).toBe("0.6.1");
-    expect(diag.eventState).toBe("not_subscribed");
-    expect(diag.eventSubscriptionCount).toBe(0);
-    expect(diag.nextStep).toContain("events/subscribe");
-    expect(diag.lastReceived.entryId).toBe(echoed.entryId);
+    expect(status.channels[0].lastAcknowledged.entryId).toBe(unread.entries.at(-1).entryId);
+    expect(status.version).toBe("0.7.0");
+    const lastHour = (await (await mcp("tools/call", { name: "read_history", arguments: { channel: "#soup", mode: "last_hour" } })).json()).result.structuredContent;
+    expect(lastHour.entries.some(item => item.entryId === echoed.entryId)).toBe(true);
     expect((await (await mcp("tools/call", { name: "send_message", arguments: outgoing })).json()).result.structuredContent.status).toBe("echoed");
     expect(sent).toEqual([["#soup", "hello room"]]);
     expect(store.db.query("SELECT count(*) AS count FROM audit").get().count).toBe(1);
@@ -261,7 +282,7 @@ test("MCP discovery, OAuth, history, posting and presence tools", async () => {
     expect((await mcp("tools/call", { name: "go_offline", arguments: {} }, readOnly.access_token)).status).toBe(401);
     expect((await (await mcp("tools/call", { name: "go_offline", arguments: {} })).json()).result.structuredContent.online).toBe(false);
     expect((await (await mcp("tools/call", { name: "send_message", arguments: { ...outgoing, idempotency_key: "offline-key-123" } })).json()).error.message).toContain("offline");
-    expect((await (await mcp("tools/call", { name: "list_channels", arguments: {} })).json()).result.structuredContent.online).toBe(false);
+    expect((await (await mcp("tools/call", { name: "see_account_information", arguments: { session_id: sessionId } })).json()).result.structuredContent.online).toBe(false);
     expect((await (await mcp("tools/call", { name: "go_online", arguments: {} })).json()).result.structuredContent.online).toBe(true);
     const refreshed = await post("/oauth/token", { grant_type: "refresh_token", client_id: client.client_id, refresh_token: tokens.refresh_token, resource: base });
     expect(refreshed.status).toBe(200);
@@ -283,7 +304,7 @@ test("owner diagnostics show bounded IRC activity and MCP calls without exposing
     const token = store.issueTokens(alice.id, "test-client", "irc:read", base).access_token;
     const called = await req("/mcp/", { method: "POST", headers: { Authorization: `Bearer ${token}`,
       "Content-Type": "application/json" }, body: JSON.stringify({ jsonrpc: "2.0", id: 1, method: "tools/call",
-      params: { name: "list_channels", arguments: {} } }) });
+      params: { name: "read_history", arguments: { channel: "#soup", mode: "recent" } } }) });
     expect(called.status).toBe(200);
     expect((await req("/admin/events")).status).toBe(401);
     const bobSession = store.createSession(bob.id);
@@ -293,7 +314,7 @@ test("owner diagnostics show bounded IRC activity and MCP calls without exposing
     expect(owner.status).toBe(200);
     const events = (await owner.json()).events;
     expect(events.find(event => event.source === "irc").text).toBe("a soup joke");
-    expect(events.find(event => event.source === "diagnostic").action).toBe("tools/call:list_channels");
+    expect(events.find(event => event.source === "diagnostic").action).toBe("tools/call:read_history");
     expect(JSON.stringify(events)).not.toContain(token);
     expect((await req("/admin/events?limit=201", { headers: { Authorization: "Bearer admin-secret" } })).status).toBe(400);
     expect((await req("/admin/events?limit=1", { headers: { Authorization: "Bearer admin-secret" } })).status).toBe(200);
@@ -446,14 +467,15 @@ test("MCP mention subscriptions verify callbacks, persist, filter, sign and unsu
     expect(validWebhookSecret("whsec_bad")).toBe(false);
     expect((await rpc("server/discover")).result.supportedVersions).toContain("2026-07-28");
     expect((await rpc("events/list")).result.events[0].name).toBe("message.mention");
-    const diagnostic = () => rpc("tools/call", { name: "get_tool_diag", arguments: {} });
-    expect((await diagnostic()).result.structuredContent.eventState).toBe("not_subscribed");
+    const firstAccount = (await rpc("tools/call", { name: "see_account_information", arguments: {} })).result.structuredContent;
+    const diagnostic = () => rpc("tools/call", { name: "see_account_information", arguments: { session_id: firstAccount.sessionId } });
+    expect(firstAccount.mentionEvents.state).toBe("not_subscribed");
     expect((await rpc("events/subscribe", { name: "message.mention", arguments: { channel: "#other" }, delivery })).error.code).toBe(-32602);
     const subscribed = (await rpc("events/subscribe", { name: "message.mention", arguments: args,
       delivery, ttlMs: null })).result;
     expect(subscribed.refreshBefore).toBeNull();
     expect(subscribed.id).toStartWith("sub_");
-    expect((await diagnostic()).result.structuredContent.eventState).toBe("subscribed_idle");
+    expect((await diagnostic()).result.structuredContent.mentionEvents.state).toBe("subscribed_idle");
     expect(deliveries[0].headers["webhook-signature"]).toBe(webhookSignature(secret,
       deliveries[0].headers["webhook-id"], deliveries[0].headers["webhook-timestamp"], deliveries[0].body));
     const time = new Date().toISOString();
@@ -464,7 +486,7 @@ test("MCP mention subscriptions verify callbacks, persist, filter, sign and unsu
     activity("alice", "alice likes soup");
     const eventEntryId = activity("bob", "hello alice, soup is ready");
     expect(store.db.query("SELECT count(*) AS count FROM event_deliveries").get().count).toBe(1);
-    expect((await diagnostic()).result.structuredContent.eventState).toBe("delivery_pending");
+    expect((await diagnostic()).result.structuredContent.mentionEvents.state).toBe("delivery_pending");
     store.close();
     store = new Store(path);
     events.store = store;
@@ -479,7 +501,7 @@ test("MCP mention subscriptions verify callbacks, persist, filter, sign and unsu
       entry.entryId === sent.data.entryId)).toBe(true);
     expect(deliveries.at(-1).headers["webhook-id"]).toBe(sent.eventId);
     expect(store.db.query("SELECT count(*) AS count FROM event_deliveries").get().count).toBe(0);
-    expect((await diagnostic()).result.structuredContent.eventState).toBe("delivery_accepted");
+    expect((await diagnostic()).result.structuredContent.mentionEvents.state).toBe("delivery_accepted");
     expect((await rpc("events/unsubscribe", { name: "message.mention", arguments: args,
       delivery: { mode: "webhook", url: callbackUrl } })).result).toEqual({});
     expect(store.listEventSubscriptions(store.userById(user.id))).toHaveLength(0);
@@ -537,6 +559,23 @@ test("event worker retries transient failures with one ID and drops a gone subsc
   } finally { store.close(); }
 });
 
+test("HTTPS callback lookup satisfies Bun's all-address request", async () => {
+  const server = net.createServer(socket => socket.destroy());
+  await new Promise(resolve => server.listen(0, "127.0.0.1", resolve));
+  try {
+    const message = await new Promise(resolve => {
+      const request = https.request(`https://callback.example:${server.address().port}/`, {
+        method: "POST", lookup: pinnedLookup({ address: "127.0.0.1", family: 4 }),
+        rejectUnauthorized: false, timeout: 2000,
+      }, () => resolve("unexpected response"));
+      request.on("error", cause => resolve(cause.message));
+      request.end("verification");
+    });
+    expect(message).not.toContain("results.sort");
+    expect(message).not.toBe("unexpected response");
+  } finally { server.close(); }
+});
+
 test("failed sends keep their identity and can be retried without changing the message ID", () => {
   const store = new Store(":memory:");
   try {
@@ -576,6 +615,33 @@ test("startup backfills stable IDs in retained activity and pending unread batch
     expect(pending.batchId).toBe(batch.batchId);
     expect(pending.entries[0].entryId).toBe(history.entries[0].entryId);
     expect(pending.entries[0].messageId).toBeNull();
+  } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
+});
+
+test("agent mailboxes survive restart and acknowledge independently under one OAuth client", () => {
+  const dir = mkdtempSync(join(tmpdir(), "zircon-agent-sessions-"));
+  const path = join(dir, "zircon.sqlite");
+  let store = new Store(path);
+  try {
+    const user = store.invite("alice", ["#soup"], "chonkbase");
+    const first = store.startAgentSession(user, "shared-client");
+    const second = store.startAgentSession(user, "shared-client");
+    const stamp = new Date().toISOString();
+    store.recordActivity(user, { channel: "#soup", kind: "message", time: stamp, observedAt: stamp,
+      timestampSource: "server", nick: "bob", text: "alice: hello" });
+    const firstBatch = store.readUnread(user, first.sessionId, "#soup", 10);
+    const secondBatch = store.readUnread(user, second.sessionId, "#soup", 10);
+    expect(firstBatch.entries[0].entryId).toBe(secondBatch.entries[0].entryId);
+    expect(store.ackMessages(user, second.sessionId, firstBatch.batchId)).toBe(false);
+    expect(store.ackMessages(user, first.sessionId, firstBatch.batchId)).toBe(true);
+    store.close();
+    store = new Store(path);
+    const restored = store.userById(user.id);
+    expect(store.startAgentSession(restored, "shared-client", first.sessionId)).toEqual(first);
+    expect(store.readUnread(restored, first.sessionId, "#soup", 10).entries).toHaveLength(0);
+    expect(store.readUnread(restored, second.sessionId, "#soup", 10)).toEqual(secondBatch);
+    expect(store.mailboxStatus(restored, first.sessionId)[0].lastAcknowledged.entryId).toBe(firstBatch.entries[0].entryId);
+    expect(store.mailboxStatus(restored, second.sessionId)[0].lastAcknowledged).toBeNull();
   } finally { store.close(); rmSync(dir, { recursive: true, force: true }); }
 });
 

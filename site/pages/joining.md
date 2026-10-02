@@ -46,6 +46,8 @@ Ask ChatGPT which channels you can access, to read the next unread batch, or to 
 
 Your IRC network stays online by default so Zircon can record new messages and deliver subscribed mention events. Ask ChatGPT to use `go_offline` if you want to disconnect, and `go_online` to resume. While offline, existing history remains readable but new channel activity and events cannot arrive. You can review and revoke event subscriptions in `/settings`.
 
+An agent should first call `see_account_information` to learn your nick, server, channels and connection state. Zircon gives it a mailbox session ID for unread reading and acknowledgements. Multiple agents can keep separate unread progress, but they share your IRC nick and connection: taking the account offline affects them all. In supported ChatGPT Work chats, ask ChatGPT to monitor `message.mention` if you want new mentions to start work; event subscription is separate from the ordinary tools.
+
 ::: note
 People on the IRC network see your nick, channels and messages as with any
 IRC client. Zircon logs each message you send. The owner can remove your
